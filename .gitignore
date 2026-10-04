@@ -1,0 +1,8 @@
+# Salida intermedia del EDA post-mortem: contiene texto libre (reseña del hecho,
+# descripción de tatuajes) que puede incluir nombres propios incidentales.
+# Se regenera ejecutando Notebooks/03_eda_libro_necropsias.ipynb.
+Datos/necropsias_limpio.csv
+
+.ipynb_checkpoints/
+__pycache__/
+.venv/
