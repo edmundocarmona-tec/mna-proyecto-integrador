@@ -1,0 +1,173 @@
+# Declaración de uso de inteligencia artificial
+
+**Proyecto Integrador MNA — Equipo 23, Grupo 10**
+Cotejo de fichas de búsqueda de personas desaparecidas (ante-mortem) con registros forenses del SEMEFO de Querétaro (post-mortem)
+Autor de esta declaración: Edmundo Carmona Galindo
+Última actualización: 24 de octubre de 2026 (documento vivo; se amplía en cada avance)
+
+---
+
+## 1. Herramientas de IA utilizadas
+
+| Herramienta | Uso | Tipo de uso |
+|---|---|---|
+| **Claude (Anthropic)**, en un Proyecto de claude.ai | Investigación de fuentes, diseño metodológico, generación y depuración de código, auditoría de notebooks, redacción y revisión de textos | Asistente de trabajo |
+| **Claude Code (Anthropic)**, CLI sobre el repositorio local y el CLI de Databricks | Revisión del repositorio, planeación del Avance 4, perfilado de tablas con consultas de agregados, redacción de esta declaración | Asistente de trabajo |
+| **Databricks Genie Code** | Ejecución asistida del EDA de las fichas sobre las tablas en Databricks | Asistente de trabajo |
+| **LLM multimodal servido en Databricks AI Gateway** (endpoint `proyecto_mna.fichas_busqueda.gema`) | Extracción estructurada de rasgos a partir de las fichas de búsqueda | **Componente del sistema propuesto** (no asistente de redacción) |
+
+## 2. División de responsabilidades
+
+- **La IA propuso, explicó y redactó.** Propuso alternativas metodológicas, escribió borradores de código y de texto, y auditó el trabajo existente.
+- **El equipo decidió, ejecutó y validó.**
+  - Las decisiones de alcance las tomó el equipo: enfoque, herramientas, uso de datos y qué se entrega.
+  - Las ejecuciones con datos reales se hicieron en el entorno del equipo, salvo lo indicado en la sección 6.
+  - Los resultados de la IA se revisaron contra los datos. En varios casos el autor detectó errores en las salidas y pidió corregirlos (ver Decisiones 9, 10 y 13).
+- **Ninguna cifra reportada proviene de la IA sin ejecución.** Todas las métricas salen de notebooks ejecutados sobre los datos.
+
+---
+
+## 3. Decisiones — Planteamiento del proyecto
+
+Decisión 1: Plantear el problema como recuperación por similitud (vinculación de registros) y no como clasificación supervisada
+- Justificación: No existen pares ficha–expediente etiquetados como coincidencia o no coincidencia, y la clase positiva es casi inexistente. El perito necesita una lista ordenada de candidatos que revisar, no una etiqueta binaria.
+- Alternativa descartada y motivo: Entrenar un clasificador binario de "identificado / no identificado". No responde la pregunta de negocio (¿qué expediente corresponde a esta ficha?) y no hay etiquetas confiables para entrenarlo.
+- Participación de la IA: Claude expuso las ventajas y limitaciones de ambos enfoques. La decisión la tomó el autor.
+
+Decisión 2: Usar Databricks Vector Search como motor de búsqueda vectorial
+- Justificación: Se integra con Unity Catalog, que da gobierno y control de acceso sobre datos sensibles, y con MLflow. Además es el stack que el autor domina profesionalmente.
+- Alternativa descartada y motivo: Una base vectorial externa (servicio en la nube de terceros), porque implicaría sacar datos sensibles del entorno gobernado.
+- Participación de la IA: Ninguna en la elección; fue decisión explícita del autor.
+
+Decisión 3: Limitar la Fase 1 al cotejo de descripciones textuales
+- Justificación: El cotejo visual (foto contra foto, superposición craneofacial) requiere otro tipo de datos, validación pericial y tiempos que exceden el curso.
+- Alternativa descartada y motivo: Incluir matching de imágenes desde el inicio. Se documenta como trabajo futuro.
+- Participación de la IA: Claude investigó precedentes (IdentIA/INACIF, Skeleton-ID). Se corrigió una referencia errónea que atribuía reconocimiento de tatuajes al sistema Angelus.
+
+Decisión 4: Validar con registros ya identificados como proxy de pares positivos
+- Justificación: Permite medir recall@k sin depender de que la Fiscalía etiquete pares manualmente.
+- Alternativa descartada y motivo: Esperar un conjunto etiquetado por peritos, que no está disponible en los tiempos del curso.
+- Participación de la IA: Claude propuso el esquema de validación. El equipo lo aprobó.
+
+## 4. Decisiones — Datos ante-mortem y EDA (Avance 2)
+
+Decisión 5: Usar las fichas públicas de la Alerta Nacional de Búsqueda como fuente de fichas
+- Justificación: No existe una base oficial descargable. Desde el protocolo publicado en el DOF (febrero de 2026), la ficha tiene un formato nacional homologado y la difunden instituciones privadas en PDF con texto extraíble.
+- Alternativa descartada y motivo: Hacer scraping de portales sin formato homogéneo, o esperar las fichas de la Comisión Local de Búsqueda, que requieren convenio.
+- Participación de la IA: Claude realizó la búsqueda de fuentes públicas. El autor validó y recolectó las fichas.
+
+Decisión 6: Extraer los rasgos con un LLM multimodal y un esquema fijo de salida (Pydantic con vocabularios controlados)
+- Justificación: El texto libre introduce ruido en los embeddings. Un esquema fijo, con `SIN_DATO` explícito para ausencias, hace comparables las fichas entre sí y con el libro de necropsias.
+- Alternativa descartada y motivo: Pedir al LLM una descripción libre, porque genera variabilidad de redacción y posibles alucinaciones difíciles de auditar.
+- Participación de la IA: Claude escribió el notebook de extracción (`01_extraccion_fichas_llm.py`) y lo adaptó a la Responses API del AI Gateway. El autor lo ejecutó en Databricks.
+
+Decisión 7: Excluir de la extracción con LLM el perfil genético y las huellas dactilares
+- Justificación: Son datos de laboratorio con formato propio. Deben manejarse como tablas separadas, no inferirse de una imagen.
+- Alternativa descartada y motivo: Extraerlos junto con los rasgos físicos, con riesgo de errores sobre evidencia crítica.
+- Participación de la IA: Claude la propuso a partir de las cinco señales de identificación descritas por el perito colaborador.
+
+Decisión 8: Agregar una capa de normalización de sinónimos con respaldo auditable, en lugar de rechazar la salida del modelo
+- Justificación: El modelo devolvía sinónimos válidos ("LISO" por "LACIO", "MEJILLA" por "CARA") que rompían la validación. Normalizarlos y registrar cada ajuste en `notas_extraccion` conserva la información y deja rastro.
+- Alternativa descartada y motivo: Descartar los registros inválidos, con pérdida de datos, o aflojar el esquema, con pérdida de comparabilidad.
+- Participación de la IA: El autor detectó los errores al ejecutar. Claude implementó la normalización.
+
+Decisión 9: Tomar la vestimenta solo del texto de la ficha (no de la foto) y registrar alteraciones como "nariz operada" como seña de tipo cirugía
+- Justificación: La foto puede ser anterior a la desaparición, así que la ropa que aparece en ella no describe los hechos. Además, una alteración quirúrgica es una seña identificatoria.
+- Alternativa descartada y motivo: Mantener el prompt original, que tomaba la ropa de la imagen y perdía la cirugía como `SIN_DATO`.
+- Participación de la IA: **El autor detectó ambos errores** al revisar una ficha real. Claude corrigió las reglas del prompt.
+
+Decisión 10: Adaptar el EDA a un problema sin variable objetivo y no imputar rasgos faltantes
+- Justificación:
+  - Las preguntas estándar de correlación con el objetivo se reemplazaron por medidas de poder discriminante (entropía por rasgo).
+  - En contexto forense, imputar un rasgo equivale a fabricar evidencia.
+  - Los atípicos de estatura se marcan para revisión, no se eliminan, porque un rasgo poco común es justamente el que distingue a una persona.
+- Alternativa descartada y motivo: Aplicar el EDA estándar con imputación y eliminación de atípicos, que contradice el objetivo forense.
+- Participación de la IA: Claude redactó las instrucciones del EDA para Genie Code y el documento de resultados. En la revisión se corrigieron imprecisiones del borrador: la recomendación de imputar, una interpretación invertida de la asimetría, el uso incorrecto de "MNAR" y el porcentaje de tatuajes al 100 % (efecto de un error de extracción). El autor cuestionó la explicación de los atípicos por grupo de edad, y la redacción final se ajustó para distinguir artefactos de muestra de atípicos reales.
+
+Decisión 11: Reportar solo agregados y seudonimizar los datos
+- Justificación: Las fichas y el libro de necropsias contienen identidades reales. Ningún entregable debe mostrar nombres, folios, carpetas de investigación ni fotos.
+- Alternativa descartada y motivo: Incluir ejemplos reales para ilustrar, por riesgo para las víctimas y sus familias, y porque no existe todavía un convenio de confidencialidad firmado.
+- Participación de la IA: Claude aplicó la regla en todos los entregables y verificó con escaneos automáticos que no hubiera nombres ni carpetas en las salidas.
+
+## 5. Decisiones — Modelo de referencia (Avance 3)
+
+Decisión 12: Reconstruir el baseline como vinculación de registros, tras detectar fuga de información en la versión original
+- Justificación: En el notebook original, el 76.5 % de las filas (4,070 de 5,317) estaban vacías y etiquetadas como "NO IDENTIFICADO". El AUC de 0.94 medía si la fila tenía datos, no algo forense. Además, el modelo respondía otra pregunta (identificado o no) en lugar de la de cotejo.
+- Alternativa descartada y motivo: Entregar el modelo original con su AUC, que habría reportado un desempeño inexistente.
+- Participación de la IA: Claude auditó el notebook contra la rúbrica y encontró la fuga. El equipo aceptó rehacer la sección.
+
+Decisión 13: Validar con pseudo-fichas (copias con ruido controlado de registros identificados) y partición agrupada por ficha
+- Justificación: No hay pares reales ficha–expediente. Las pseudo-fichas dan positivos conocidos y permiten probar la robustez con tres niveles de ruido. Agrupar por ficha evita que pares de una misma ficha caigan en entrenamiento y prueba.
+- Alternativa descartada y motivo: Partición aleatoria por pares, que oculta el sobreajuste. Los resultados con pseudo-fichas se reportan como cota optimista.
+- Participación de la IA: Claude diseñó el protocolo. Lo probó primero con datos simulados y después lo ejecutó con el registro real (ver sección 6). Durante la ejecución se encontró que una variable ("señas vacías") hacía que B2 rindiera menos que B1. Se separó en dos indicadores (lado ficha y lado expediente) y se ajustó con validación cruzada.
+
+Decisión 14: Usar Recall@k y MRR como métricas principales
+- Justificación: El perito revisa una lista corta. Lo que importa es si el expediente correcto aparece entre los primeros k. Recall@10 traduce directamente la reducción del espacio de revisión (de unos 1,247 expedientes a 10).
+- Alternativa descartada y motivo: Exactitud o ROC-AUC a nivel de par, que son engañosas con clases extremadamente desbalanceadas. PR-AUC se reporta solo como complemento.
+- Participación de la IA: Claude propuso las métricas y el umbral de negocio. El equipo los aprobó.
+
+Decisión 15: Elegir como baseline oficial una regresión logística sobre vectores de comparación (B2), frente al azar (B0) y una heurística TF-IDF (B1)
+- Justificación: Es la versión discriminativa del modelo clásico de Fellegi y Sunter. Es interpretable para el perito, tiene baja varianza con pocos positivos y no muestra sobreajuste (train ≈ CV ≈ 0.847). Obtuvo Recall@10 = 0.869, contra 0.028 del azar y 0.850 de la heurística.
+- Alternativa descartada y motivo: Random Forest como baseline. Rindió menos en prueba (0.804) y memoriza con pocos positivos.
+- Participación de la IA: Claude implementó y ejecutó la comparación. El diagnóstico de sobreajuste se corrigió para basarse en validación cruzada y no en una sola brecha de un conjunto de prueba pequeño.
+
+Decisión 16: Aplicar un blocking amplio (mismo sexo y diferencia de edad de hasta 15 años, solo cuando ambos datos existen)
+- Justificación: Reduce el cómputo y replica el primer filtro del perito, sin descartar candidatos por datos faltantes. Su costo se mide con *pair completeness*.
+- Alternativa descartada y motivo: Tolerancias estrechas (por ejemplo, ±5 años), con riesgo de eliminar al candidato correcto por errores de estimación de edad post-mortem. Queda pendiente validarlas con el perito.
+- Participación de la IA: Claude lo propuso. Los umbrales siguen abiertos a validación pericial.
+
+## 6. Manejo de datos con herramientas de IA
+
+- **Fichas de búsqueda.** Se procesaron dentro de Databricks: Volume de Unity Catalog y endpoint del AI Gateway. A la conversación con Claude se compartieron resúmenes agregados y una ficha de ejemplo para depurar el prompt de extracción.
+- **Libro de necropsias.** Para cerrar el Avance 3, el archivo del registro se cargó en una sesión de Claude para ejecutar el notebook de punta a punta. Se verificó que las salidas del notebook no contuvieran nombres ni carpetas de investigación.
+- **Entregables.** Contienen solo agregados y estructuras genéricas.
+- **Claude Code (Avance 4).** Leyó el código fuente de los notebooks y los esquemas de las tablas. En Databricks ejecutó solo consultas de agregados (conteos, porcentajes de llenado y frecuencias de palabras con 40 o más apariciones) en el SQL warehouse del equipo. No vio registros individuales, nombres, folios ni carpetas. Las consultas se guardaron fuera del repositorio.
+
+## 7. Decisiones — Modelos alternativos (Avance 4, en curso)
+
+Decisión 17: Comparar tipos de búsqueda (familias de recuperación y puntuación) como los modelos alternativos del avance
+- Justificación: El proyecto es de cotejo. La pregunta relevante es qué forma de buscar recupera mejor el expediente correcto: léxica, probabilística, supervisada, de ranking o semántica. Cada tipo es un algoritmo individual con sus propios hiperparámetros, y todos se evalúan sobre el mismo conjunto de candidatos.
+- Alternativa descartada y motivo: Comparar solo clasificadores sobre el mismo vector de comparación, que dejaría sin probar la hipótesis central (que la representación semántica supera a la léxica).
+- Participación de la IA: Idea del autor. Claude propuso las seis familias y el protocolo de comparación.
+
+Decisión 18: Registrar todos los experimentos en MLflow (Databricks)
+- Justificación: Reproducibilidad y comparación con criterios comunes (parámetros, métricas, versión de datos y semilla), y trazabilidad del ajuste de hiperparámetros, como pide CRISP-ML(Q).
+- Alternativa descartada y motivo: Tablas de resultados manuales en el notebook, difíciles de auditar y de reproducir.
+- Participación de la IA: Decisión del autor. Claude propone la estructura del experimento.
+
+Decisión 19: Usar `necropsias_enriquecidas` como fuente consolidada post-mortem: la unión de `registro_necropsias_2020_2026` (1,246 registros) con `registro_necropsias_2026` (58 registros con detalle forense)
+- Justificación: La tabla nueva amplía la cobertura (2006–2026) y la anterior aporta tatuajes, cicatrices, edad y municipio en los casos que comparten. La anterior es subconjunto completo de la nueva (`No = #`), lo que se verificó en el notebook 05a.
+- Alternativa descartada y motivo: Usar solo una de las dos tablas. Con la nueva sola se pierde el detalle forense; con la anterior sola quedan apenas 58 casos.
+- Participación de la IA: La consolidación la hizo el equipo (notebook 05a). Claude Code revisó el código y señaló que el detalle forense existe en solo 58 registros.
+
+Decisión 20: Plantear la consulta en dirección necropsia → fichas: para cada persona registrada en el libro de necropsias se recupera un ranking de fichas de búsqueda candidatas
+- Justificación: Es la pregunta operativa del SEMEFO ante un cuerpo sin identificar. Recall@k y MRR se miden por necropsia consultada.
+- Alternativa descartada y motivo: Ficha → necropsias, como estaba en el planteamiento inicial. Sigue siendo válida para la Comisión de Búsqueda y se puede invertir con los mismos componentes, pero no es el uso que se evalúa en este avance.
+- Participación de la IA: Decisión del autor. Claude Code detectó que los notebooks de Vector Search ya consultaban en esta dirección, mientras que la documentación decía lo contrario, y pidió fijarla antes de definir las métricas.
+
+Decisión 21: Perfilar las tablas post-mortem antes de diseñar los modelos (fase P0), usando solo consultas de agregados
+- Justificación: El alcance real del cotejo depende de qué facetas existen en ambos lados. Resultados principales (1,246 necropsias):
+  - Ropa descrita en 847 registros (68 %). Es texto semiestructurado: prenda, color, marca, talla, leyendas.
+  - Tatuajes en solo 12 registros y señas en 5, contra 46 y 17 de las 60 fichas.
+  - Edad y municipio solo en 58 registros. Fecha de ingreso en prácticamente todos.
+  - 892 no identificados y 354 identificados no reclamados; ningún identificado reclamado. 61 fetos y 93 restos óseos.
+- Alternativa descartada y motivo: Diseñar los modelos asumiendo que los tatuajes, la faceta más discriminante de las fichas, estarían disponibles en las necropsias. El perfilado muestra que casi no se registran.
+- Participación de la IA: Claude Code diseñó y ejecutó las consultas desde el CLI de Databricks con el perfil del autor. Solo obtuvo conteos y frecuencias de palabras de la ropa (las que aparecen 40 veces o más); no leyó registros individuales.
+
+### Propuestas pendientes de aprobación (Avance 4)
+
+Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las apruebe, rechace o modifique, pasan a ser decisiones numeradas.
+
+- P-A: Extraer las necropsias con el **mismo esquema Pydantic** que las fichas (LLM de solo texto sobre ropa, pertenencias y tatuajes) antes de comparar. Motivo: hoy se compara texto canónico contra texto libre, lo que explica los scores planos (0.52–0.59) del notebook `05_matching`
+- P-B: Comparar **por faceta**, con emparejamiento elemento por elemento (prenda contra prenda, tatuaje contra tatuaje), en lugar de un solo embedding del texto completo.
+- P-C:Tratar los pesos por faceta (0.65/0.25/0.10 del notebook 06) como **hiperparámetros o pesos aprendidos**, no como valores fijos a mano.
+- P-D:Generar pseudo-fichas desde los 251 identificados no reclamados que tienen ropa descrita, con ruido en tres niveles y partición agrupada por necropsia. Galería = 60 fichas reales + pseudo-fichas.
+- P-E:Blocking: mismo sexo, `fecha_hechos ≤ fecha_ingreso` y fetos excluidos de la consulta. La edad se usa solo en los 58 registros que la tienen.
+- P-F: Hacer de la **vestimenta la faceta principal**, con pertenencias como faceta propia y tatuajes como señal secundaria. Reportar la escasez de tatuajes como recomendación de captura para el SEMEFO.
+### Trabajo en Databricks pendiente de documentar (participación de la IA por confirmar)
+
+- Extracción v2: todas las páginas de un PDF en una sola llamada al LLM, porque procesar página por página generaba fichas alucinadas.
+- Elección del modelo de embeddings `databricks-qwen3-embedding-0-6b` y del endpoint de Vector Search `forensic`.
+- Índices separados por faceta (`vs_tatuajes_idx`, `vs_vestimenta_idx`, `vs_senas_idx`) y los pesos 0.65/0.25/0.10.
+- Normalización de sexo en necropsias, que prefiere la tabla de 2026 cuando reporta HOMBRE o MUJER.
+- El endpoint `gema` sirve Claude Sonnet 4.5 (según `resumen_proyecto.md`); confirmar y agregarlo en la tabla de herramientas.
