@@ -154,6 +154,21 @@ Decisión 21: Perfilar las tablas post-mortem antes de diseñar los modelos (fas
 - Alternativa descartada y motivo: Diseñar los modelos asumiendo que los tatuajes, la faceta más discriminante de las fichas, estarían disponibles en las necropsias. El perfilado muestra que casi no se registran.
 - Participación de la IA: Claude Code diseñó y ejecutó las consultas desde el CLI de Databricks con el perfil del autor. Solo obtuvo conteos y frecuencias de palabras de la ropa (las que aparecen 40 veces o más); no leyó registros individuales.
 
+Decisión 22: Usar un cotejo determinístico tipo SQL (reglas de coincidencia exacta) como baseline y comparar contra él siete técnicas individuales: cadenas aproximadas (Jaro-Winkler/Levenshtein), BM25 por faceta, Fellegi-Sunter con EM (Splink), regresión logística, LambdaMART, embeddings densos con Vector Search y cross-encoder
+- Justificación: Las reglas SQL reproducen el razonamiento del perito (misma prenda, mismo color, misma marca) y dan una referencia fácil de explicar. Las siete técnicas cubren de lo más rígido a lo más flexible y superan el mínimo de seis modelos individuales que pide la rúbrica. Varias comparten el emparejamiento elemento por elemento (asignación húngara entre prendas, tatuajes y pertenencias).
+- Alternativa descartada y motivo: Contar las reglas SQL como uno de los seis modelos. Se prefirió usarlas como referencia, junto con el azar (B0), para que las técnicas de aprendizaje se midan contra el criterio de un perito.
+- Participación de la IA: El autor propuso incluir el matching tipo SQL. Claude Code propuso el catálogo de técnicas, el orden y el emparejamiento por conjuntos. El autor lo aprobó.
+
+Decisión 23: Evaluar todos los modelos con un arnés común (notebook `00_config_evaluacion`) y un solo experimento de MLflow (`/Shared/proyecto_mna/avance4_cotejo`), con runs padre por fase (comparación, ajuste de los 2 mejores, final)
+- Justificación: La rúbrica pide ordenar por la métrica principal, mostrar al menos dos métricas más y reportar tiempos de entrenamiento. El arnés lo garantiza para todos los modelos por igual:
+  - Cada modelo entrega un ranking con el mismo formato `(id_consulta, id_ficha, score)` y una sola función calcula Recall@1/5/10/20, MRR, PR-AUC a nivel par e IC 95 % por bootstrap.
+  - Los empates se resuelven de forma pesimista, para no inflar a los modelos de reglas, que producen muchos scores iguales.
+  - Si el blocking elimina la ficha correcta, cuenta como fallo, así su costo entra en la métrica final.
+  - Se registran tiempos de entrenamiento e inferencia, y la versión Delta de cada tabla de entrada (reproducible sin subir datos).
+  - Privacidad: autolog sin datasets ni ejemplos de entrada, tracing de LLM desactivado, solo gráficas de agregados. Los rankings van a una tabla de Unity Catalog con `run_id`, no a MLflow.
+- Alternativa descartada y motivo: Que cada notebook calcule sus propias métricas, con riesgo de criterios distintos (manejo de empates, consultas excluidas) que harían injusta la comparación.
+- Participación de la IA: Claude Code escribió el notebook, lo subió al workspace y lo ejecutó como job serverless con una autoprueba sobre datos sintéticos (ranking perfecto, al azar y todo empatado). La autoprueba pasó. No se usaron datos reales en esta prueba.
+
 ### Propuestas pendientes de aprobación (Avance 4)
 
 Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las apruebe, rechace o modifique, pasan a ser decisiones numeradas.
@@ -164,6 +179,7 @@ Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las
 - P-D:Generar pseudo-fichas desde los 251 identificados no reclamados que tienen ropa descrita, con ruido en tres niveles y partición agrupada por necropsia. Galería = 60 fichas reales + pseudo-fichas.
 - P-E:Blocking: mismo sexo, `fecha_hechos ≤ fecha_ingreso` y fetos excluidos de la consulta. La edad se usa solo en los 58 registros que la tienen.
 - P-F: Hacer de la **vestimenta la faceta principal**, con pertenencias como faceta propia y tatuajes como señal secundaria. Reportar la escasez de tatuajes como recomendación de captura para el SEMEFO.
+
 ### Trabajo en Databricks pendiente de documentar (participación de la IA por confirmar)
 
 - Extracción v2: todas las páginas de un PDF en una sola llamada al LLM, porque procesar página por página generaba fichas alucinadas.

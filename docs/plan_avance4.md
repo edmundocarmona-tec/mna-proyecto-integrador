@@ -129,6 +129,16 @@ Una sola tabla de pares que usan **todos** los modelos:
 - Salida: tabla `candidatos_top_k` (id_necropsia seudonimizado, id_ficha, score, facetas que coinciden).
 - Meta: Recall@10 ≥ 0.97 (≥ 0.80 con ruido alto).
 
+## 3.1 Cobertura de la rúbrica
+
+| Criterio (pts) | Cómo se cubre |
+|---|---|
+| **Comparativa (60)**: ≥ 6 modelos individuales con algoritmos variados, ordenados por la métrica principal, ≥ 2 métricas más y tiempos de entrenamiento | 7 modelos + baseline SQL + azar. `tabla_comparativa()` ordena por Recall@10 y muestra MRR, Recall@1/5/20, PR-AUC, Recall@10 con ruido alto, tiempo de entrenamiento y de inferencia |
+| **Ajuste fino (30)**: hiperparámetros con suficientes iteraciones | Optuna sobre los 2 mejores, ≥ 50 trials cada uno, un run hijo por trial bajo `ajuste_top2`, validación cruzada agrupada; se registra la curva de optimización y la importancia de hiperparámetros |
+| **Modelo individual (10)**: argumentos sólidos, trade-offs, interpretabilidad | Comparar los 2 ajustados en Recall@10, robustez al ruido alto, latencia y explicabilidad por faceta para el perito; la justificación se escribe en el notebook final y en la bitácora |
+
+Arnés: `Notebooks/Databricks/00_config_evaluacion.py` (subido a `/Users/<usuario>/proyecto_mna/avance4/`; autoprueba sintética OK).
+
 ## 4. Riesgos
 
 1. **Pocas necropsias con facetas.** Si P0 muestra que casi nadie tiene tatuajes o ropa descrita, el techo de cualquier modelo es bajo; se reporta como hallazgo y como recomendación de captura al SEMEFO.
