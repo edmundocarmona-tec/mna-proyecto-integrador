@@ -43,6 +43,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import mlflow
+from pyspark.sql import functions as F
 from sklearn.metrics import average_precision_score
 
 CATALOG = dbutils.widgets.get("catalog")
@@ -88,7 +89,11 @@ ENTRADAS_VERSIONADAS = [T_NECROPSIAS, T_FICHAS_TEXTO, T_FICHAS_VESTIMENTA, T_FIC
 
 # COMMAND ----------
 
+import posixpath
+from databricks.sdk import WorkspaceClient
+
 mlflow.set_registry_uri("databricks-uc")
+WorkspaceClient().workspace.mkdirs(posixpath.dirname(EXPERIMENTO))   # set_experiment no crea carpetas
 mlflow.set_experiment(EXPERIMENTO)
 
 # Ningún autolog global: cada notebook lo activa explícitamente, y siempre sin datos.
@@ -285,7 +290,7 @@ def corrida(nombre, familia, fase, params=None, nivel_ruido="todos", padre=None,
     with mlflow.start_run(run_name=nombre, nested=anidado,
                           parent_run_id=padre) as run:
         mlflow.set_tags({"modelo": nombre, "familia": familia, "fase": fase, "nivel_ruido": nivel_ruido,
-                         "direccion": "necropsia_a_fichas", **(tags or {})})
+                         "direccion": "necropsia_a_fichas", "es_padre": "false", **(tags or {})})
         mlflow.log_params({"semilla": SEMILLA, "metrica_principal": METRICA_PRINCIPAL, **(params or {})})
         mlflow.log_params(versiones_tablas())
         yield _Corrida(run, nombre)
@@ -312,7 +317,7 @@ def fase_padre(fase, descripcion=""):
 def tabla_comparativa(fase="comparacion", nivel_ruido="todos"):
     runs = mlflow.search_runs(
         experiment_names=[EXPERIMENTO],
-        filter_string=f"tags.fase = '{fase}' AND tags.nivel_ruido = '{nivel_ruido}' AND tags.es_padre IS NULL",
+        filter_string=f"tags.fase = '{fase}' AND tags.nivel_ruido = '{nivel_ruido}' AND tags.es_padre = 'false'",
     )
     if runs.empty:
         print("Sin corridas para", fase, nivel_ruido)
@@ -353,7 +358,6 @@ def grafica_comparativa(t: pd.DataFrame, titulo="Comparativa de modelos"):
 
 # COMMAND ----------
 
-from pyspark.sql import functions as F
 
 if AUTOPRUEBA:
     rng = np.random.default_rng(0)
