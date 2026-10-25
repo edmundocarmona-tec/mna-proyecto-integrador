@@ -211,7 +211,7 @@ Decisión 27: Entregar como Avance 4 el notebook de Jaqueline (`Notebooks/Avance
   - El no supervisado sobre datos reales mide la señal que existe hoy entre fichas y necropsias reales.
 - Alternativa descartada y motivo: Entregar el notebook no supervisado (`…_forensic_match.ipynb`). Describe con más fidelidad los datos reales, pero su métrica principal (cobertura) mide señal y no acierto, y su ajuste fino cubre solo dos modelos sin red neuronal, lo que lo pone por debajo en la rúbrica.
 - Condición pendiente: el notebook de Jaqueline se entrega sin modificar sus resultados. Sus salidas incluyen tres tablas con cuasi-identificadores de expedientes reales (sexo, edad, estatura, municipio). Se recomienda que la autora las regenere enmascaradas antes de compartir el archivo fuera del equipo.
-- Participación de la IA: Claude Code estimó la calificación de ambos notebooks y recomendó el de Jaqueline. La decisión la tomó el autor.
+- Participación de la IA: Claude Code estimó la calificación de ambos notebooks y recomendó el de Jaqueline. La decisión la tomó el autor. A petición del autor, Claude Code agregó al notebook una celda de texto con el resumen de esta declaración, antes de las referencias. Se verificó que las 36 celdas originales, con todas sus salidas, quedaran idénticas: el cambio es solo de inserción.
 
 ### Revisión de los entregables del Avance 4 contra la rúbrica (hecha por la IA)
 
