@@ -3,7 +3,7 @@
 **Proyecto Integrador MNA — Equipo 23, Grupo 10**
 Cotejo de fichas de búsqueda de personas desaparecidas (ante-mortem) con registros forenses del SEMEFO de Querétaro (post-mortem)
 Autor de esta declaración: Edmundo Carmona Galindo
-Última actualización: 24 de octubre de 2026 (documento vivo; se amplía en cada avance)
+Última actualización: 25 de octubre de 2026 (documento vivo; se amplía en cada avance)
 
 ---
 
@@ -123,7 +123,7 @@ Decisión 16: Aplicar un blocking amplio (mismo sexo y diferencia de edad de has
 - **Entregables.** Contienen solo agregados y estructuras genéricas.
 - **Claude Code (Avance 4).** Leyó el código fuente de los notebooks y los esquemas de las tablas. En Databricks ejecutó solo consultas de agregados (conteos, porcentajes de llenado y frecuencias de palabras con 40 o más apariciones) en el SQL warehouse del equipo. No vio registros individuales, nombres, folios ni carpetas. Las consultas se guardaron fuera del repositorio.
 
-## 7. Decisiones — Modelos alternativos (Avance 4, en curso)
+## 7. Decisiones — Modelos alternativos (Avance 4)
 
 Decisión 17: Comparar tipos de búsqueda (familias de recuperación y puntuación) como los modelos alternativos del avance
 - Justificación: El proyecto es de cotejo. La pregunta relevante es qué forma de buscar recupera mejor el expediente correcto: léxica, probabilística, supervisada, de ranking o semántica. Cada tipo es un algoritmo individual con sus propios hiperparámetros, y todos se evalúan sobre el mismo conjunto de candidatos.
@@ -204,6 +204,15 @@ Decisión 26: Elegir BM25 ajustado como modelo individual final del Avance 4
 
   El autor eligió la métrica, aprobó los modelos y pidió que todo quedara en un solo notebook.
 
+Decisión 27: Entregar como Avance 4 el notebook de Jaqueline (`Notebooks/Avance_4_Modelos_Alternativos_equipo23.ipynb`), con sus resultados originales, y conservar el trabajo no supervisado sobre datos reales como línea de validación hacia la Fiscalía
+- Justificación: Con la rúbrica del avance (Comparativa 60, Ajuste fino 30, Modelo individual 10), el notebook de Jaqueline obtiene la mayor calificación estimada (≈ 92–100 frente a ≈ 83–93; ver la revisión siguiente). Usa una métrica convencional (Recall@10), ocho familias de clasificadores y un ajuste fino que incluye tasa de aprendizaje, activación y arquitectura de un MLP.
+- Alcance de la decisión: aplica al entregable académico. Implica que el entregable usa un enfoque supervisado con pseudo-fichas, lo que contradice la Decisión 24 para este avance. Ambos enfoques se reportan con su alcance:
+  - El supervisado con pseudo-fichas mide el techo del cotejo cuando la ficha se parece al expediente.
+  - El no supervisado sobre datos reales mide la señal que existe hoy entre fichas y necropsias reales.
+- Alternativa descartada y motivo: Entregar el notebook no supervisado (`…_forensic_match.ipynb`). Describe con más fidelidad los datos reales, pero su métrica principal (cobertura) mide señal y no acierto, y su ajuste fino cubre solo dos modelos sin red neuronal, lo que lo pone por debajo en la rúbrica.
+- Condición pendiente: el notebook de Jaqueline se entrega sin modificar sus resultados. Sus salidas incluyen tres tablas con cuasi-identificadores de expedientes reales (sexo, edad, estatura, municipio). Se recomienda que la autora las regenere enmascaradas antes de compartir el archivo fuera del equipo.
+- Participación de la IA: Claude Code estimó la calificación de ambos notebooks y recomendó el de Jaqueline. La decisión la tomó el autor.
+
 ### Revisión de los entregables del Avance 4 contra la rúbrica (hecha por la IA)
 
 El autor pidió a Claude Code comparar los dos notebooks del Avance 4 contra la rúbrica (Comparativa 60, Ajuste fino 30, Modelo individual 10). La revisión leyó la estructura, el código y los tipos de salida. No abrió filas ni textos de las salidas. Es una estimación de la IA, no una calificación oficial. La elección del entregable corresponde al equipo.
@@ -243,3 +252,60 @@ Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las
 - Índices separados por faceta (`vs_tatuajes_idx`, `vs_vestimenta_idx`, `vs_senas_idx`) y los pesos 0.65/0.25/0.10.
 - Normalización de sexo en necropsias, que prefiere la tabla de 2026 cuando reporta HOMBRE o MUJER.
 - El endpoint `gema` sirve Claude Sonnet 4.5 (según `resumen_proyecto.md`); confirmar y agregarlo en la tabla de herramientas.
+
+## 8. Resumen del Avance 4: resultado entregado y camino recorrido
+
+### 8.1 Resultado entregado (notebook de Jaqueline)
+
+`Notebooks/Avance_4_Modelos_Alternativos_equipo23.ipynb`, autora Jaqueline Villafranca Hernández. Cotejo ficha → expediente evaluado como ranking sobre 107 pseudo-fichas de prueba (64,008 pares), con blocking (techo del protocolo: Recall@10 = 0.981) y un vector de comparación de 10 características.
+
+**Comparativa de los ocho modelos individuales** (ordenada por Recall@10, métrica principal):
+
+| Modelo | Recall@10 | Recall@1 | MRR | PR-AUC | Entrenamiento (s) | Inferencia por ficha (ms) |
+|---|---|---|---|---|---|---|
+| Regresión logística | **0.869** | 0.766 | 0.802 | 0.581 | 0.04 | 0.02 |
+| SVM lineal | 0.860 | 0.738 | 0.781 | 0.483 | 0.08 | 0.01 |
+| Perceptrón multicapa (MLP) | 0.860 | 0.729 | 0.784 | 0.645 | 4.28 | 0.06 |
+| k-NN | 0.841 | 0.682 | 0.742 | 0.662 | 0.04 | 12.24 |
+| Naive Bayes gaussiano | 0.841 | 0.645 | 0.710 | 0.381 | 0.01 | 0.03 |
+| SVM RBF (Nyström) | 0.841 | 0.570 | 0.664 | 0.254 | 2.17 | 0.38 |
+| LDA | 0.832 | 0.710 | 0.752 | 0.304 | 0.04 | 0.01 |
+| Árbol de decisión (CART) | 0.766 | 0.589 | 0.647 | 0.501 | 0.10 | 0.01 |
+| *Piso: heurística TF-IDF* | *0.850* | *0.766* | *0.801* | *0.521* | — | — |
+| *Piso: azar* | *0.028* | *0.000* | *0.014* | *0.002* | — | — |
+
+**Ajuste fino** (60 configuraciones × 5 pliegues de `GroupKFold` = 300 ajustes por modelo):
+
+| Modelo | Recall@10 antes | Recall@10 después | IC 95 % |
+|---|---|---|---|
+| Regresión logística | 0.869 | 0.869 (se conserva la configuración preliminar) | 0.804–0.925 |
+| SVM lineal | 0.860 | 0.850 | 0.785–0.916 |
+| MLP | 0.860 | 0.841 | 0.775–0.907 |
+
+**Robustez al ruido de la ficha** (Recall@10, ruido bajo / medio / alto): regresión logística 0.925 / 0.850 / 0.710; SVM lineal 0.907 / 0.804 / 0.701; MLP 0.888 / 0.794 / 0.692; heurística TF-IDF 0.916 / 0.794 / 0.692.
+
+**Modelo final: regresión logística.** Los IC de los finalistas se traslapan. Desempató una matriz ponderada: Recall@10 en el límite inferior del IC 30 %, interpretabilidad 25 %, Recall@1/MRR 15 %, robustez 15 %, costo 10 %, calibración 5 %. Puntajes: regresión logística 4.98, SVM lineal 3.00, MLP 1.40. Se cumple el umbral de negocio (Recall@10 ≥ 0.60), pero no la meta de 0.97. Conclusión de la autora: el límite está en la representación (10 características), no en el algoritmo.
+
+### 8.2 Camino recorrido para llegar al entregable (con participación de la IA)
+
+| Etapa | Qué se hizo | Quién decidió / ejecutó | Resultado |
+|---|---|---|---|
+| Revisión del repositorio | Inventario de notebooks, duplicados y datos sensibles en el historial | Claude Code revisó; el autor pidió empezar de nuevo | Plan de reorganización y alerta de privacidad |
+| Fuente post-mortem | Consolidación `necropsias_enriquecidas` (1,246 registros) | Equipo (notebook 05a); IA revisó | Decisión 19 |
+| Dirección de la consulta | Necropsia → fichas | Autor | Decisión 20 |
+| Perfilado P0 | Conteos agregados en Databricks: ropa en 68 % de necropsias, tatuajes en 12, edad en 58 | IA diseñó y ejecutó consultas de solo agregados | Decisión 21; la vestimenta pasa a ser la faceta principal |
+| Arnés y experimento | Notebook común de evaluación y experimento MLflow `/Shared/proyecto_mna/avance4_cotejo` | IA escribió y probó con datos sintéticos; autor aprobó | Decisiones 22 y 23 |
+| Restricción no supervisada | Sin pares confirmados: sin modelos supervisados ni pseudo-fichas en el enfoque de datos reales | Autor | Decisión 24 |
+| Métrica sin etiquetas | Cobertura con z robusto ≥ 5, calibrada por simulación (con z ≥ 3 el azar daba 21 %) | Autor eligió la métrica; IA la definió y calibró | Decisión 25 |
+| Galería de fichas | La tabla gold no describe prendas (0 de 75); se usó la galería por facetas (60 fichas) | IA lo detectó y verificó; reglas SQL con cobertura 0 en la gold | Registrado en la Decisión 26 |
+| Siete modelos no supervisados | SQL, fuzzy, TF-IDF, BM25, Splink (EM), embeddings qwen3 y cross-encoder sobre 884 necropsias reales | IA escribió y ejecutó como job; corrigió incompatibilidad de MLflow y límite 429 | Cobertura: TF-IDF 0.602, BM25 0.469, Splink 0.356, cross-encoder 0.317, SQL 0.205, fuzzy 0.175, embeddings 0.000, azar 0.000 |
+| Ajuste fino no supervisado | Optuna, 50 intentos × 2 finalistas, ajuste en mitad A y validación en mitad B | IA escribió y ejecutó | BM25 ajustado: cobertura en validación 0.699 (IC 0.655–0.745); Decisión 26 |
+| Comparación de entregables | Estimación de calificación de ambos notebooks contra la rúbrica | IA estimó; autor eligió | Decisión 27: se entrega el notebook de Jaqueline |
+| Privacidad del repositorio | Purga del historial de git (fotos de fichas y libro de necropsias) | Autor autorizó; IA reescribió el historial local | Pendiente el force push a GitHub y la solicitud a GitHub Support |
+
+### 8.3 Qué aporta cada enfoque y qué sigue
+
+- **Notebook entregado (supervisado, pseudo-fichas):** responde qué tan bien se encontraría el expediente si la ficha se pareciera a él. Recall@10 = 0.869 es un techo optimista: las pseudo-fichas se generan a partir del propio expediente.
+- **Trabajo no supervisado sobre datos reales (`…_forensic_match.ipynb` y `Notebooks/Databricks/Avance_4_equipo23.py`):** responde si hoy existe señal entre fichas y necropsias reales. BM25 propone un candidato que destaca en ~70 % de las necropsias evaluables y deja 620 necropsias no identificadas con su top-10 para revisión pericial (tabla `candidatos_top10_modelo_final` en Unity Catalog).
+- **Hallazgos comunes:** los métodos léxicos y lineales igualan o superan a los más complejos (MLP, cross-encoder, embeddings). Ambos notebooks apuntan a que el límite está en la representación y en la captura de datos, sobre todo la escasez de tatuajes registrados en el SEMEFO.
+- **Siguiente paso, acordado con el autor:** validar contra la realidad con peritos. Para eso hacen falta pares ficha ↔ necropsia confirmados (resultados de búsquedas concluidas) y datos más ricos de la operación forense. Con ellos se calcula Recall@k sobre casos reales y se calibra la confianza que se muestra al perito.
