@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 20 · Comparación de métodos rápidos (Avance 4)
+# MAGIC Comparación de métodos rápidos (Avance 4)
 # MAGIC
 # MAGIC **Proyecto Integrador MNA — Cotejo ante-mortem / post-mortem (Querétaro)**
 # MAGIC
