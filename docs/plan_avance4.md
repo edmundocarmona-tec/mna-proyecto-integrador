@@ -1,5 +1,12 @@
 # Plan — Avance 4: cotejo por facetas necropsia → fichas
 
+> **AVISO (Decisión 24): el Avance 4 es un cotejo NO supervisado.** No hay pares ficha ↔ necropsia confirmados.
+> No se entrenan modelos supervisados, no se generan pseudo-fichas ni datos sintéticos, y no se vuelve a extraer
+> nada con LLM. Se compara directamente `necropsias_enriquecidas` (consultas) contra `fichas_vector_search_gold`
+> (galería, 75 fichas). Las secciones de este documento sobre extracción de necropsias (P1), pseudo-fichas (P2),
+> modelos supervisados (regresión logística, LambdaMART) y Recall@k quedan **descartadas**; ver `CLAUDE.md`.
+
+
 Proyecto Integrador MNA — Equipo 23. Documento de trabajo (24 de octubre de 2026).
 Todo se ejecuta en Databricks sobre `proyecto_mna.fichas_busqueda`. Ninguna fila real sale del workspace.
 

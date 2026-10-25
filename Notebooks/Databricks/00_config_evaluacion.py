@@ -11,11 +11,12 @@
 # MAGIC |---|---|
 # MAGIC | Nombres de tablas y parámetros | Todos leen las mismas entradas y escriben en el mismo lugar |
 # MAGIC | Contrato de ranking `(id_consulta, id_ficha, score)` | Cada modelo entrega lo mismo; nadie calcula su propia métrica |
-# MAGIC | `evaluar()` | Recall@1/5/10/20, MRR, PR-AUC a nivel par, IC 95 % por bootstrap, desglose por nivel de ruido |
+# MAGIC | `evaluar()` | Cobertura (métrica principal), margen top-1 vs top-2, IC 95 % por bootstrap — **sin etiquetas** |
 # MAGIC | `corrida()` | Run de MLflow con tags, parámetros, versiones Delta de las entradas y **tiempos de entrenamiento e inferencia** |
-# MAGIC | `tabla_comparativa()` | Modelos ordenados por la métrica principal (Recall@10) con las métricas secundarias y los tiempos |
+# MAGIC | `tabla_comparativa()` | Modelos ordenados por cobertura, con margen, concordancia entre métodos y tiempos |
 # MAGIC
-# MAGIC **Dirección de la consulta (Decisión 20):** cada consulta es un registro de necropsia; la galería son fichas de búsqueda.
+# MAGIC **Cotejo no supervisado (Decisión 24):** no hay pares ficha ↔ necropsia confirmados, así que no hay Recall@k ni MRR.
+# MAGIC **Dirección de la consulta (Decisión 20):** cada consulta es un registro de necropsia; la galería son las fichas.
 # MAGIC
 # MAGIC **Reglas de privacidad en MLflow**
 # MAGIC - Solo parámetros, métricas agregadas y gráficas de agregados. Nunca filas, textos ni identificadores.
@@ -33,7 +34,8 @@ dbutils.widgets.text("schema", "fichas_busqueda", "Esquema")
 dbutils.widgets.text("experimento", "/Shared/proyecto_mna/avance4_cotejo", "Experimento MLflow")
 dbutils.widgets.text("semilla", "23", "Semilla")
 dbutils.widgets.text("n_bootstrap", "1000", "Réplicas bootstrap para IC 95 %")
-dbutils.widgets.dropdown("autoprueba", "false", ["true", "false"], "Correr autoprueba con datos sintéticos")
+dbutils.widgets.text("z_umbral", "5", "z robusto mínimo para contar una consulta como cubierta")
+dbutils.widgets.dropdown("autoprueba", "false", ["true", "false"], "Correr autoprueba con scores simulados")
 
 # COMMAND ----------
 
@@ -44,44 +46,35 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import mlflow
 from pyspark.sql import functions as F
-from sklearn.metrics import average_precision_score
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 EXPERIMENTO = dbutils.widgets.get("experimento")
 SEMILLA = int(dbutils.widgets.get("semilla"))
 N_BOOTSTRAP = int(dbutils.widgets.get("n_bootstrap"))
+Z_UMBRAL = float(dbutils.widgets.get("z_umbral"))
 AUTOPRUEBA = dbutils.widgets.get("autoprueba") == "true"
 
-KS = [1, 5, 10, 20]
-METRICA_PRINCIPAL = "recall_at_10"
-METRICAS_SECUNDARIAS = ["mrr", "recall_at_1", "recall_at_5", "recall_at_20", "pr_auc_par"]
+METRICA_PRINCIPAL = "cobertura"
+METRICAS_SECUNDARIAS = ["margen_mediano", "cobertura_z2", "concordancia_top10"]
+MIN_CANDIDATOS = 15     # con menos candidatos la escala robusta es inestable y el ruido "destaca" seguido
+TOPE_Z = 10.0           # z infinito (resto empatado) se acota para promediar márgenes
 
 def _t(nombre):
     return f"{CATALOG}.{SCHEMA}.{nombre}"
 
-# Entradas existentes
-T_NECROPSIAS = _t("necropsias_enriquecidas")
-T_FICHAS_TEXTO = _t("fichas_texto_embedding")
-T_FICHAS_PERSONA = _t("fichas_persona_silver")
-T_FICHAS_TATUAJES = _t("fichas_tatuajes_silver")
-T_FICHAS_SENAS = _t("fichas_senas_silver")
+# Entradas (ya existen; no se regeneran)
+T_NECROPSIAS = _t("necropsias_enriquecidas")       # consultas
+T_FICHAS_GOLD = _t("fichas_vector_search_gold")     # galería: 75 fichas, texto_canonico_fe + filtros
+T_FICHAS_TEXTO = _t("fichas_texto_embedding")      # galería: 60 fichas con texto por faceta (vestimenta, tatuajes, señas)
 T_FICHAS_VESTIMENTA = _t("fichas_vestimenta_silver")
+T_FICHAS_TATUAJES = _t("fichas_tatuajes_silver")
 
-# Salidas del Avance 4 (las crean los notebooks 11–14)
-T_NEC_BRONZE = _t("necropsias_extraccion_bronze")
-T_NEC_PERSONA = _t("necropsias_persona_silver")
-T_NEC_TATUAJES = _t("necropsias_tatuajes_silver")
-T_NEC_VESTIMENTA = _t("necropsias_vestimenta_silver")
-T_NEC_PERTENENCIAS = _t("necropsias_pertenencias_silver")
-T_NEC_TEXTO = _t("necropsias_texto_embedding")
-T_PSEUDOFICHAS = _t("pseudofichas")              # galería sintética (estilo ficha)
-T_VERDAD = _t("pseudofichas_verdad")             # (id_consulta, id_ficha, nivel_ruido, split)
-T_CANDIDATOS = _t("candidatos_bloqueados")        # pares que sobreviven el blocking
-T_RANKINGS = _t("resultados_rankings")           # rankings de cada run, con run_id
+# Salidas del Avance 4
+T_CANDIDATOS = _t("candidatos_bloqueados")          # pares que sobreviven el blocking
+T_RANKINGS = _t("resultados_rankings")              # rankings de cada run, con run_id
 
-ENTRADAS_VERSIONADAS = [T_NECROPSIAS, T_FICHAS_TEXTO, T_FICHAS_VESTIMENTA, T_FICHAS_TATUAJES,
-                        T_PSEUDOFICHAS, T_VERDAD, T_CANDIDATOS]
+ENTRADAS_VERSIONADAS = [T_NECROPSIAS, T_FICHAS_GOLD, T_FICHAS_TEXTO, T_CANDIDATOS]
 
 # COMMAND ----------
 
@@ -130,68 +123,72 @@ def versiones_tablas(tablas=ENTRADAS_VERSIONADAS):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Evaluación
+# MAGIC ## 4. Evaluación sin etiquetas
 # MAGIC
-# MAGIC - **Empates:** se resuelven de forma **pesimista** (el correcto queda en el peor lugar del empate). Sin esto, un modelo
-# MAGIC   de reglas con muchos scores iguales parecería mejor de lo que es.
-# MAGIC - **Correcto fuera de los candidatos** (lo eliminó el blocking): cuenta como fallo. Así el costo del blocking entra en
-# MAGIC   la métrica final y no se puede maquillar con un blocking estrecho.
-# MAGIC - Solo se evalúan las consultas que tienen verdad conocida (pseudo-fichas); las necropsias reales sin match no entran.
+# MAGIC Cada método puntúa en su propia escala (BM25 no tiene tope, el coseno va de 0 a 1, las reglas cuentan
+# MAGIC coincidencias), así que un umbral fijo de score no sirve para compararlos. Por eso todo se mide **dentro de cada
+# MAGIC consulta**, contra sus propios candidatos:
+# MAGIC
+# MAGIC - **z del mejor candidato** = (score del 1.º − mediana del resto) / escala del resto, con escala = 1.4826 × MAD
+# MAGIC   (si es 0, la desviación estándar; si también es 0, z = ∞ cuando el 1.º supera al resto y 0 si empata).
+# MAGIC - **Cobertura (métrica principal)** = % de consultas evaluables cuyo mejor candidato tiene z ≥ `z_umbral` (5):
+# MAGIC   el método propone al perito un candidato que destaca claramente.
+# MAGIC - **Calibración del umbral** (simulación con scores normales puro ruido): con z ≥ 3 un método aleatorio "cubre" 16–19 %
+# MAGIC   de las consultas; con z ≥ 5 y ≥ 15 candidatos, ≤ 2.5 % (0.1 % con 70 candidatos). Por eso z = 5 y mínimo 15.
+# MAGIC - **Margen mediano** = mediana de (1.º − 2.º) / escala: qué tan separado queda el mejor del segundo.
+# MAGIC - Consultas con menos de 15 candidatos no son evaluables y se reportan aparte.
+# MAGIC
+# MAGIC **Limitación:** la cobertura mide que el método encuentra una señal fuerte, **no** que el candidato sea correcto.
+# MAGIC Eso solo lo puede confirmar el perito.
 
 # COMMAND ----------
 
-def rango_del_correcto(rankings: pd.DataFrame, verdad: pd.DataFrame) -> pd.DataFrame:
-    """Devuelve una fila por consulta con el rango (1 = primero) de la ficha correcta, o NaN si no fue recuperada."""
-    r = rankings[["id_consulta", "id_ficha", "score"]].copy()
-    r["rango"] = r.groupby("id_consulta")["score"].rank(method="max", ascending=False)
-    cols = ["id_consulta", "id_ficha"] + [c for c in ["nivel_ruido", "split"] if c in verdad.columns]
-    out = verdad[cols].merge(r[["id_consulta", "id_ficha", "rango"]], on=["id_consulta", "id_ficha"], how="left")
-    return out
+def senal_por_consulta(rankings: pd.DataFrame) -> pd.DataFrame:
+    """Una fila por consulta: n de candidatos, z robusto del mejor candidato y margen sobre el segundo."""
+    filas = []
+    for q, g in rankings.groupby("id_consulta", sort=False):
+        s = np.sort(g["score"].to_numpy(dtype=float))[::-1]
+        n = len(s)
+        if n < MIN_CANDIDATOS:
+            filas.append((q, n, np.nan, np.nan))
+            continue
+        resto = s[1:]
+        med = np.median(resto)
+        escala = 1.4826 * np.median(np.abs(resto - med))
+        if escala == 0:
+            escala = resto.std()
+        if escala == 0:
+            z = np.inf if s[0] > med else 0.0
+            margen = np.inf if s[0] > s[1] else 0.0
+        else:
+            z = (s[0] - med) / escala
+            margen = (s[0] - s[1]) / escala
+        filas.append((q, n, z, margen))
+    return pd.DataFrame(filas, columns=["id_consulta", "n_candidatos", "z_top1", "margen"])
 
 
-def _metricas_de_rangos(rangos: np.ndarray) -> dict:
-    m = {f"recall_at_{k}": float(np.mean(np.nan_to_num(rangos, nan=np.inf) <= k)) for k in KS}
-    m["mrr"] = float(np.mean(np.nan_to_num(1.0 / rangos, nan=0.0)))
-    return m
+def _ic_bootstrap(indicador: np.ndarray, rng) -> tuple:
+    n = len(indicador)
+    reps = [indicador[rng.integers(0, n, n)].mean() for _ in range(N_BOOTSTRAP)]
+    return float(np.percentile(reps, 2.5)), float(np.percentile(reps, 97.5))
 
 
-def _ic_bootstrap(rangos: np.ndarray, rng) -> dict:
-    reps = {METRICA_PRINCIPAL: [], "mrr": []}
-    n = len(rangos)
-    for _ in range(N_BOOTSTRAP):
-        m = _metricas_de_rangos(rangos[rng.integers(0, n, n)])
-        reps[METRICA_PRINCIPAL].append(m[METRICA_PRINCIPAL])
-        reps["mrr"].append(m["mrr"])
-    ic = {}
-    for nombre, valores in reps.items():
-        ic[f"{nombre}_ic_inf"] = float(np.percentile(valores, 2.5))
-        ic[f"{nombre}_ic_sup"] = float(np.percentile(valores, 97.5))
-    return ic
-
-
-def evaluar(rankings: pd.DataFrame, verdad: pd.DataFrame) -> dict:
-    """Métricas agregadas de un ranking contra la verdad conocida, global y por nivel de ruido."""
+def evaluar(rankings: pd.DataFrame) -> tuple:
+    """Métricas agregadas sin etiquetas de un ranking."""
     rng = np.random.default_rng(SEMILLA)
-    rc = rango_del_correcto(rankings, verdad)
-    rangos = rc["rango"].to_numpy(dtype=float)
+    sp = senal_por_consulta(rankings)
+    ev = sp.dropna(subset=["z_top1"])
+    cubierta = (ev["z_top1"] >= Z_UMBRAL).to_numpy(dtype=float)
 
-    m = _metricas_de_rangos(rangos)
-    m.update(_ic_bootstrap(rangos, rng))
-    m["n_consultas"] = int(len(rc))
-    m["recuperados_en_candidatos"] = float(np.mean(~np.isnan(rangos)))   # pair completeness efectiva
-    m["candidatos_por_consulta"] = float(rankings.groupby("id_consulta").size().mean())
-
-    # PR-AUC a nivel par (complemento): cada candidato es positivo si es la ficha correcta.
-    pares = rankings.merge(verdad[["id_consulta", "id_ficha"]].assign(es_match=1),
-                           on=["id_consulta", "id_ficha"], how="left").fillna({"es_match": 0})
-    pares = pares[pares["id_consulta"].isin(verdad["id_consulta"])]
-    m["pr_auc_par"] = float(average_precision_score(pares["es_match"], pares["score"])) if pares["es_match"].any() else 0.0
-
-    if "nivel_ruido" in rc.columns:
-        for nivel, g in rc.groupby("nivel_ruido"):
-            for nombre, valor in _metricas_de_rangos(g["rango"].to_numpy(dtype=float)).items():
-                m[f"{nombre}__ruido_{nivel}"] = valor
-    return m, rc
+    m = {"cobertura": float(cubierta.mean()) if len(ev) else 0.0}
+    m["cobertura_ic_inf"], m["cobertura_ic_sup"] = _ic_bootstrap(cubierta, rng) if len(ev) else (0.0, 0.0)
+    m["cobertura_z2"] = float((ev["z_top1"] >= 2).mean()) if len(ev) else 0.0
+    m["margen_mediano"] = float(np.median(np.minimum(ev["margen"], TOPE_Z))) if len(ev) else 0.0
+    m["consultas_total"] = int(len(sp))
+    m["consultas_evaluables"] = int(len(ev))
+    m["consultas_pocos_candidatos"] = int(len(sp) - len(ev))
+    m["candidatos_por_consulta"] = float(sp["n_candidatos"].mean()) if len(sp) else 0.0
+    return m, sp
 
 # COMMAND ----------
 
@@ -199,21 +196,21 @@ def evaluar(rankings: pd.DataFrame, verdad: pd.DataFrame) -> dict:
 
 # COMMAND ----------
 
-def graficas_agregadas(rc: pd.DataFrame, titulo: str):
-    rangos = rc["rango"].to_numpy(dtype=float)
-    ks = np.arange(1, 51)
-    curva = [np.mean(np.nan_to_num(rangos, nan=np.inf) <= k) for k in ks]
+def graficas_agregadas(sp: pd.DataFrame, titulo: str):
+    ev = sp.dropna(subset=["z_top1"])
+    z = np.minimum(ev["z_top1"].to_numpy(dtype=float), TOPE_Z)
+    umbrales = np.linspace(0, TOPE_Z, 101)
 
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.8))
-    ax[0].plot(ks, curva, color="#2b6cb0")
-    for k in KS:
-        ax[0].axvline(k, color="#cbd5e0", lw=0.8, zorder=0)
-    ax[0].set(title="Recall@k", xlabel="k", ylabel="Recall", ylim=(0, 1.02))
+    ax[0].plot(umbrales, [(z >= u).mean() if len(z) else 0 for u in umbrales], color="#2b6cb0")
+    ax[0].axvline(Z_UMBRAL, color="#c53030", ls="--", lw=1, label=f"umbral z = {Z_UMBRAL:g}")
+    ax[0].set(title="Cobertura según umbral", xlabel="z robusto del mejor candidato", ylabel="cobertura",
+              ylim=(0, 1.02))
+    ax[0].legend(loc="upper right")
 
-    finitos = rangos[~np.isnan(rangos)]
-    ax[1].hist(np.clip(finitos, 1, 51), bins=np.arange(1, 53) - 0.5, color="#2b6cb0")
-    ax[1].set(title=f"Rango del correcto (no recuperados: {int(np.isnan(rangos).sum())})",
-              xlabel="rango (51 = >50)", ylabel="consultas")
+    ax[1].hist(z, bins=np.linspace(0, TOPE_Z, 41), color="#2b6cb0")
+    ax[1].axvline(Z_UMBRAL, color="#c53030", ls="--", lw=1)
+    ax[1].set(title=f"z del mejor candidato (acotado a {TOPE_Z:g})", xlabel="z", ylabel="consultas")
     fig.suptitle(titulo)
     fig.tight_layout()
     return fig
@@ -225,16 +222,16 @@ def graficas_agregadas(rc: pd.DataFrame, titulo: str):
 # MAGIC
 # MAGIC Uso desde un notebook de modelo:
 # MAGIC ```python
-# MAGIC with corrida("3_regresion_logistica", familia="supervisada_lineal", fase="comparacion",
-# MAGIC              params={"C": 1.0}) as c:
-# MAGIC     with c.entrenamiento():
-# MAGIC         modelo.fit(X_train, y_train)
-# MAGIC     with c.inferencia():
-# MAGIC         rankings = puntuar(modelo, candidatos_prueba)
-# MAGIC     c.registrar(rankings, verdad_prueba)
+# MAGIC with fase_padre("comparacion"):
+# MAGIC     with corrida("3_bm25", familia="lexico", fase="comparacion", params={"k1": 1.2, "b": 0.75}) as c:
+# MAGIC         with c.entrenamiento():
+# MAGIC             indice = construir_bm25(fichas)
+# MAGIC         with c.inferencia():
+# MAGIC             rankings = puntuar(indice, candidatos)     # pandas: id_consulta, id_ficha, score
+# MAGIC         c.registrar(rankings)
 # MAGIC ```
-# MAGIC Los modelos sin entrenamiento (reglas SQL, BM25) registran como "entrenamiento" la construcción de su índice o
-# MAGIC estadísticas; si no hay nada que construir, el tiempo es 0.
+# MAGIC Ningún método se entrena con etiquetas. "Entrenamiento" es lo que el método construye antes de consultar:
+# MAGIC índice BM25 o TF-IDF, estimación EM de Splink, embeddings de la galería. Si no construye nada, el tiempo es 0.
 
 # COMMAND ----------
 
@@ -256,17 +253,17 @@ class _Corrida:
     def inferencia(self):
         return self._cronometro("tiempo_inferencia_s")
 
-    def registrar(self, rankings: pd.DataFrame, verdad: pd.DataFrame, guardar_rankings=True):
+    def registrar(self, rankings: pd.DataFrame, guardar_rankings=True):
         faltan = {"id_consulta", "id_ficha", "score"} - set(rankings.columns)
         assert not faltan, f"El ranking no cumple el contrato; faltan columnas: {faltan}"
         rankings = rankings[["id_consulta", "id_ficha", "score"]]
 
-        metricas, rc = evaluar(rankings, verdad)
-        n = max(metricas["n_consultas"], 1)
+        metricas, sp = evaluar(rankings)
+        n = max(metricas["consultas_total"], 1)
         metricas.update(self.tiempos)
         metricas["tiempo_inferencia_ms_por_consulta"] = 1000 * self.tiempos["tiempo_inferencia_s"] / n
         mlflow.log_metrics(metricas)
-        mlflow.log_figure(graficas_agregadas(rc, self.nombre), "graficas/recall_y_rango.png")
+        mlflow.log_figure(graficas_agregadas(sp, self.nombre), "graficas/cobertura_y_z.png")
         plt.close("all")
 
         if guardar_rankings:
@@ -277,21 +274,21 @@ class _Corrida:
                   .withColumn("modelo", F.lit(self.nombre))
                   .write.mode("append").saveAsTable(T_RANKINGS))
 
-        print(f"{self.nombre}: Recall@10 = {metricas['recall_at_10']:.3f} "
-              f"[{metricas['recall_at_10_ic_inf']:.3f}–{metricas['recall_at_10_ic_sup']:.3f}], "
-              f"MRR = {metricas['mrr']:.3f}, entrenamiento = {self.tiempos['tiempo_entrenamiento_s']:.1f} s")
+        print(f"{self.nombre}: cobertura = {metricas['cobertura']:.3f} "
+              f"[{metricas['cobertura_ic_inf']:.3f}–{metricas['cobertura_ic_sup']:.3f}], "
+              f"margen mediano = {metricas['margen_mediano']:.2f}, "
+              f"entrenamiento = {self.tiempos['tiempo_entrenamiento_s']:.1f} s")
         return metricas
 
 
 @contextlib.contextmanager
-def corrida(nombre, familia, fase, params=None, nivel_ruido="todos", padre=None, tags=None):
-    """Abre un run (anidado si hay un run activo o se da `padre`) con tags y parámetros comunes."""
-    anidado = padre is not None or mlflow.active_run() is not None
-    with mlflow.start_run(run_name=nombre, nested=anidado,
-                          parent_run_id=padre) as run:
-        mlflow.set_tags({"modelo": nombre, "familia": familia, "fase": fase, "nivel_ruido": nivel_ruido,
+def corrida(nombre, familia, fase, params=None, tags=None):
+    """Abre un run (anidado bajo el run activo, normalmente el de fase_padre) con tags y parámetros comunes."""
+    with mlflow.start_run(run_name=nombre, nested=mlflow.active_run() is not None) as run:
+        mlflow.set_tags({"modelo": nombre, "familia": familia, "fase": fase, "supervision": "ninguna",
                          "direccion": "necropsia_a_fichas", "es_padre": "false", **(tags or {})})
-        mlflow.log_params({"semilla": SEMILLA, "metrica_principal": METRICA_PRINCIPAL, **(params or {})})
+        mlflow.log_params({"semilla": SEMILLA, "metrica_principal": METRICA_PRINCIPAL, "z_umbral": Z_UMBRAL,
+                           "min_candidatos": MIN_CANDIDATOS, **(params or {})})
         mlflow.log_params(versiones_tablas())
         yield _Corrida(run, nombre)
 
@@ -310,38 +307,57 @@ def fase_padre(fase, descripcion=""):
 # MAGIC %md
 # MAGIC ## 7. Comparativa
 # MAGIC
-# MAGIC Tabla para la rúbrica: modelos **ordenados por la métrica principal**, con métricas secundarias y tiempos.
+# MAGIC Tabla para la rúbrica: modelos **ordenados por cobertura**, con métricas secundarias y tiempos.
+# MAGIC La **concordancia top-10** es el Jaccard promedio entre el top-10 de un método y el de cada uno de los demás:
+# MAGIC indica si encuentra candidatos que otros métodos también ven, o si se aparta de todos.
 
 # COMMAND ----------
 
-def tabla_comparativa(fase="comparacion", nivel_ruido="todos"):
+def concordancia_top10(run_ids: list) -> dict:
+    r = (spark.table(T_RANKINGS).where(F.col("run_id").isin(run_ids))
+              .select("run_id", "id_consulta", "id_ficha", "score").toPandas())
+    r = r.sort_values(["run_id", "id_consulta", "score"], ascending=[True, True, False])
+    top = r.groupby(["run_id", "id_consulta"]).head(10).groupby(["run_id", "id_consulta"])["id_ficha"].apply(frozenset)
+    tops = {rid: top.xs(rid, level="run_id") for rid in run_ids if rid in top.index.get_level_values(0)}
+    out = {}
+    for a in tops:
+        valores = []
+        for b in tops:
+            if a == b:
+                continue
+            comunes = tops[a].index.intersection(tops[b].index)
+            valores += [len(tops[a][q] & tops[b][q]) / len(tops[a][q] | tops[b][q]) for q in comunes]
+        out[a] = float(np.mean(valores)) if valores else np.nan
+    return out
+
+
+def tabla_comparativa(fase="comparacion", filtro=""):
     runs = mlflow.search_runs(
         experiment_names=[EXPERIMENTO],
-        filter_string=f"tags.fase = '{fase}' AND tags.nivel_ruido = '{nivel_ruido}' AND tags.es_padre = 'false'",
+        filter_string=f"tags.fase = '{fase}' AND tags.es_padre = 'false'" + (f" AND {filtro}" if filtro else ""),
+        order_by=["attributes.start_time DESC"],
     )
     if runs.empty:
-        print("Sin corridas para", fase, nivel_ruido)
+        print("Sin corridas para", fase)
         return runs
+    runs = runs.drop_duplicates("tags.modelo")          # la corrida más reciente de cada modelo
+    runs["metrics.concordancia_top10"] = runs["run_id"].map(concordancia_top10(list(runs["run_id"])))
     cols = (["tags.modelo", "tags.familia", f"metrics.{METRICA_PRINCIPAL}",
              f"metrics.{METRICA_PRINCIPAL}_ic_inf", f"metrics.{METRICA_PRINCIPAL}_ic_sup"]
             + [f"metrics.{m}" for m in METRICAS_SECUNDARIAS]
-            + ["metrics.recall_at_10__ruido_alto", "metrics.tiempo_entrenamiento_s",
+            + ["metrics.consultas_evaluables", "metrics.tiempo_entrenamiento_s",
                "metrics.tiempo_inferencia_ms_por_consulta", "run_id"])
     cols = [c for c in cols if c in runs.columns]
-    t = (runs[cols].sort_values(f"metrics.{METRICA_PRINCIPAL}", ascending=False)
-                    .rename(columns=lambda c: c.split(".", 1)[-1]))
-    # Si hay varias corridas del mismo modelo, se conserva la mejor.
-    return t.drop_duplicates("modelo").reset_index(drop=True)
+    return (runs[cols].sort_values(f"metrics.{METRICA_PRINCIPAL}", ascending=False)
+                      .rename(columns=lambda c: c.split(".", 1)[-1]).reset_index(drop=True))
 
 
-def grafica_comparativa(t: pd.DataFrame, titulo="Comparativa de modelos"):
+def grafica_comparativa(t: pd.DataFrame, titulo="Comparativa de métodos (sin etiquetas)"):
     t = t.iloc[::-1]
     fig, ax = plt.subplots(1, 2, figsize=(12, 0.5 * len(t) + 1.5), sharey=True)
-    err = [t[METRICA_PRINCIPAL] - t[f"{METRICA_PRINCIPAL}_ic_inf"], t[f"{METRICA_PRINCIPAL}_ic_sup"] - t[METRICA_PRINCIPAL]]
-    ax[0].barh(t["modelo"], t[METRICA_PRINCIPAL], xerr=err, color="#2b6cb0")
-    ax[0].axvline(0.97, color="#c53030", ls="--", lw=1, label="meta 0.97")
-    ax[0].set(xlabel="Recall@10 (IC 95 %)", xlim=(0, 1))
-    ax[0].legend(loc="lower right")
+    err = [t["cobertura"] - t["cobertura_ic_inf"], t["cobertura_ic_sup"] - t["cobertura"]]
+    ax[0].barh(t["modelo"], t["cobertura"], xerr=err, color="#2b6cb0")
+    ax[0].set(xlabel=f"Cobertura (z ≥ {Z_UMBRAL:g}, IC 95 %)", xlim=(0, 1))
     ax[1].barh(t["modelo"], t["tiempo_entrenamiento_s"], color="#718096")
     ax[1].set(xlabel="Tiempo de entrenamiento (s)")
     fig.suptitle(titulo)
@@ -351,33 +367,39 @@ def grafica_comparativa(t: pd.DataFrame, titulo="Comparativa de modelos"):
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Autoprueba con datos sintéticos
+# MAGIC ## 8. Autoprueba del arnés
 # MAGIC
-# MAGIC Verifica el arnés sin tocar datos reales: un ranking perfecto debe dar Recall@k = 1 y MRR = 1, y uno al azar debe
-# MAGIC acercarse a k / tamaño de galería. No escribe en MLflow ni en Unity Catalog.
+# MAGIC Verifica las métricas con scores simulados (no son datos del proyecto; no escribe en MLflow ni en Unity Catalog):
+# MAGIC scores al azar (uniformes o normales) ⇒ cobertura ≈ 0; un candidato que destaca 8 desviaciones en cada consulta ⇒ cobertura ≈ 1;
+# MAGIC todo empatado ⇒ cobertura 0; reglas con un solo candidato con coincidencias ⇒ cubierta.
 
 # COMMAND ----------
 
-
 if AUTOPRUEBA:
     rng = np.random.default_rng(0)
-    n_q, n_g = 200, 100
-    verdad_sint = pd.DataFrame({"id_consulta": [f"q{i}" for i in range(n_q)],
-                                "id_ficha": [f"f{i % n_g}" for i in range(n_q)],
-                                "nivel_ruido": rng.choice(["bajo", "medio", "alto"], n_q)})
-    pares = pd.DataFrame([(q, f"f{j}") for q in verdad_sint["id_consulta"] for j in range(n_g)],
+    n_q, n_g = 300, 70
+    pares = pd.DataFrame([(f"q{i}", f"f{j}") for i in range(n_q) for j in range(n_g)],
                          columns=["id_consulta", "id_ficha"])
-    pares = pares.merge(verdad_sint[["id_consulta", "id_ficha"]].assign(ok=1), how="left").fillna({"ok": 0})
 
-    perfecto = pares.assign(score=pares["ok"])
     azar = pares.assign(score=rng.random(len(pares)))
-    empatado = pares.assign(score=1.0)                      # todo empatado: pesimista ⇒ rango = n_g
+    normal = pares.assign(score=rng.normal(size=len(pares)))
+    destaca = normal.copy()
+    destaca.loc[destaca["id_ficha"] == "f0", "score"] += 8
+    empatado = pares.assign(score=1.0)
+    reglas = pares.assign(score=(pares["id_ficha"] == "f0").astype(float) * 2)
+    pocos = pares[pares["id_ficha"].isin(["f0", "f1", "f2"])].assign(score=1.0)
 
-    m_p, _ = evaluar(perfecto, verdad_sint)
-    m_a, _ = evaluar(azar, verdad_sint)
-    m_e, _ = evaluar(empatado, verdad_sint)
-    assert m_p["recall_at_1"] == 1.0 and m_p["mrr"] == 1.0
-    assert abs(m_a["recall_at_10"] - 10 / n_g) < 0.06, m_a["recall_at_10"]
-    assert m_e["recall_at_20"] == 0.0, "los empates deben resolverse de forma pesimista"
-    print("Autoprueba OK — perfecto:", m_p["recall_at_10"], "| azar:", round(m_a["recall_at_10"], 3),
-          "| empatado:", m_e["recall_at_20"])
+    m_a, _ = evaluar(azar)
+    m_n, _ = evaluar(normal)
+    m_d, _ = evaluar(destaca)
+    m_e, _ = evaluar(empatado)
+    m_r, _ = evaluar(reglas)
+    m_p, _ = evaluar(pocos)
+    assert m_a["cobertura"] == 0.0, m_a["cobertura"]
+    assert m_n["cobertura"] < 0.05, m_n["cobertura"]
+    assert m_d["cobertura"] > 0.95, m_d["cobertura"]
+    assert m_e["cobertura"] == 0.0 and m_e["margen_mediano"] == 0.0
+    assert m_r["cobertura"] == 1.0
+    assert m_p["consultas_evaluables"] == 0 and m_p["consultas_pocos_candidatos"] == n_q
+    print("Autoprueba OK — azar:", m_a["cobertura"], "| normal:", round(m_n["cobertura"], 3),
+          "| destaca:", round(m_d["cobertura"], 3), "| empatado:", m_e["cobertura"], "| reglas:", m_r["cobertura"])

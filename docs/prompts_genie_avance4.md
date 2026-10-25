@@ -1,5 +1,12 @@
 # Prompts para Genie Code — Avance 4
 
+> **AVISO (Decisión 24): el Avance 4 es un cotejo NO supervisado.** No hay pares ficha ↔ necropsia confirmados.
+> No se entrenan modelos supervisados, no se generan pseudo-fichas ni datos sintéticos, y no se vuelve a extraer
+> nada con LLM. Se compara directamente `necropsias_enriquecidas` (consultas) contra `fichas_vector_search_gold`
+> (galería, 75 fichas). Las secciones de este documento sobre extracción de necropsias (P1), pseudo-fichas (P2),
+> modelos supervisados (regresión logística, LambdaMART) y Recall@k quedan **descartadas**; ver `CLAUDE.md`.
+
+
 Redactados por Claude Code (24 oct 2026) para ejecutar en Databricks con datos reales. Uso:
 
 1. Crear el notebook vacío en `/Users/<usuario>/proyecto_mna/avance4/` (junto a `00_config_evaluacion`).

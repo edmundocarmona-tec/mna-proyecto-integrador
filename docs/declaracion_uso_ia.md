@@ -169,15 +169,33 @@ Decisión 23: Evaluar todos los modelos con un arnés común (notebook `00_confi
 - Alternativa descartada y motivo: Que cada notebook calcule sus propias métricas, con riesgo de criterios distintos (manejo de empates, consultas excluidas) que harían injusta la comparación.
 - Participación de la IA: Claude Code escribió el notebook, lo subió al workspace y lo ejecutó como job serverless con una autoprueba sobre datos sintéticos (ranking perfecto, al azar y todo empatado). La autoprueba pasó. No se usaron datos reales en esta prueba.
 
+Decisión 24: Tratar el Avance 4 como un cotejo no supervisado: sin modelos supervisados, sin datos sintéticos y sin nuevas extracciones con LLM
+- Justificación: No existen pares ficha ↔ necropsia confirmados y las tablas no contienen nombres que permitan construirlos. Las fichas ya están procesadas (`fichas_vector_search_gold`, 75 fichas con texto canónico y filtros) y las necropsias consolidadas (`necropsias_enriquecidas`). Las comparaciones se hacen directamente entre esas tablas reales.
+- Consecuencias:
+  - Salen la regresión logística y LambdaMART (requieren etiquetas). Entra TF-IDF + coseno. Quedan siete métodos no supervisados: reglas SQL, cadenas aproximadas, TF-IDF, BM25, Fellegi-Sunter con EM, embeddings con Vector Search y cross-encoder preentrenado sin ajuste.
+  - Recall@k y MRR no se pueden calcular sin verdad conocida. La métrica principal sin etiquetas queda por definir con el autor.
+  - El "ajuste fino" se hace sobre los hiperparámetros de cada método (pesos por faceta, parámetros de BM25, umbrales de Splink, modelo de embeddings).
+- Alternativa descartada y motivo: Generar pseudo-fichas como en el Avance 3, o volver a extraer las necropsias con LLM. El autor las descartó para trabajar solo con los datos reales existentes.
+- Participación de la IA: Decisión del autor. Claude Code había propuesto pseudo-fichas y extracción de necropsias (P-A y P-D). El autor las rechazó y pidió dejar la restricción por escrito para cualquier agente. Claude Code la registró en `CLAUDE.md`, en el skill del proyecto, en el plan y en esta bitácora.
+
+Decisión 25: Usar la cobertura como métrica principal del Avance 4, medida sin etiquetas y comparable entre métodos
+- Justificación: Sin verdad conocida y sin un perito disponible para validar en este momento, la cobertura es la métrica que se puede calcular para todos los métodos. Se define así: % de necropsias en las que el mejor candidato destaca claramente frente a los demás candidatos de esa misma necropsia.
+  - Como cada método puntúa en una escala distinta (BM25 sin tope, coseno de 0 a 1, reglas que cuentan coincidencias), no se usa un umbral fijo de score. Se usa un z robusto dentro de cada consulta: (score del 1.º − mediana del resto) / (1.4826 × MAD del resto).
+  - Umbral calibrado por simulación. Con z ≥ 3, un método de puro ruido "cubría" 16–19 % de las consultas. Con z ≥ 5 y al menos 15 candidatos por consulta, ≤ 2.5 % (0.1 % con 70 candidatos).
+  - Secundarias: margen mediano entre el 1.º y el 2.º, cobertura con z ≥ 2, concordancia top-10 entre métodos y tiempos de entrenamiento e inferencia.
+- Limitación declarada: la cobertura mide que el método encuentra una señal fuerte, no que el candidato sea correcto. La confirmación es pericial.
+- Alternativa descartada y motivo: Precisión@5 según revisión pericial, porque no se cuenta con el perito en esta etapa. Concordancia entre métodos como métrica principal, porque es circular (premia parecerse a la mayoría).
+- Participación de la IA: El autor eligió la cobertura. Claude Code propuso la definición con z robusto. La primera versión (z ≥ 3) falló la autoprueba del arnés: con scores al azar daba 21 % de cobertura. A raíz de eso, Claude Code simuló la distribución nula y ajustó el umbral a z ≥ 5 con mínimo 15 candidatos. El arnés actualizado pasó la autoprueba en Databricks.
+
 ### Propuestas pendientes de aprobación (Avance 4)
 
 Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las apruebe, rechace o modifique, pasan a ser decisiones numeradas.
 
-- P-A: Extraer las necropsias con el **mismo esquema Pydantic** que las fichas (LLM de solo texto sobre ropa, pertenencias y tatuajes) antes de comparar. Motivo: hoy se compara texto canónico contra texto libre, lo que explica los scores planos (0.52–0.59) del notebook `05_matching`
+- ~~P-A~~ (descartada por el autor, Decisión 24): Extraer las necropsias con el **mismo esquema Pydantic** que las fichas (LLM de solo texto sobre ropa, pertenencias y tatuajes) antes de comparar. Motivo: hoy se compara texto canónico contra texto libre, lo que explica los scores planos (0.52–0.59) del notebook `05_matching`
 - P-B: Comparar **por faceta**, con emparejamiento elemento por elemento (prenda contra prenda, tatuaje contra tatuaje), en lugar de un solo embedding del texto completo.
-- P-C:Tratar los pesos por faceta (0.65/0.25/0.10 del notebook 06) como **hiperparámetros o pesos aprendidos**, no como valores fijos a mano.
-- P-D:Generar pseudo-fichas desde los 251 identificados no reclamados que tienen ropa descrita, con ruido en tres niveles y partición agrupada por necropsia. Galería = 60 fichas reales + pseudo-fichas.
-- P-E:Blocking: mismo sexo, `fecha_hechos ≤ fecha_ingreso` y fetos excluidos de la consulta. La edad se usa solo en los 58 registros que la tienen.
+- P-C: Tratar los pesos por faceta (0.65/0.25/0.10 del notebook 06) como **hiperparámetros o pesos aprendidos**, no como valores fijos a mano.
+- ~~P-D~~ (descartada por el autor, Decisión 24): Generar pseudo-fichas desde los 251 identificados no reclamados que tienen ropa descrita, con ruido en tres niveles y partición agrupada por necropsia. Galería = 60 fichas reales + pseudo-fichas.
+- P-E: Blocking: mismo sexo, `fecha_hechos ≤ fecha_ingreso` y fetos excluidos de la consulta. La edad se usa solo en los 58 registros que la tienen.
 - P-F: Hacer de la **vestimenta la faceta principal**, con pertenencias como faceta propia y tatuajes como señal secundaria. Reportar la escasez de tatuajes como recomendación de captura para el SEMEFO.
 
 ### Trabajo en Databricks pendiente de documentar (participación de la IA por confirmar)
