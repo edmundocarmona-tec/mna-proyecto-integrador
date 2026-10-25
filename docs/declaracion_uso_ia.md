@@ -122,6 +122,7 @@ Decisión 16: Aplicar un blocking amplio (mismo sexo y diferencia de edad de has
 - **Libro de necropsias.** Para cerrar el Avance 3, el archivo del registro se cargó en una sesión de Claude para ejecutar el notebook de punta a punta. Se verificó que las salidas del notebook no contuvieran nombres ni carpetas de investigación.
 - **Entregables.** Contienen solo agregados y estructuras genéricas.
 - **Claude Code (Avance 4).** Leyó el código fuente de los notebooks y los esquemas de las tablas. En Databricks ejecutó solo consultas de agregados (conteos, porcentajes de llenado y frecuencias de palabras con 40 o más apariciones) en el SQL warehouse del equipo. No vio registros individuales, nombres, folios ni carpetas. Las consultas se guardaron fuera del repositorio.
+- **Purga del historial de git (25 de octubre de 2026).** Las fotos de dos fichas de búsqueda y el libro de necropsias se habían subido al repositorio en avances anteriores y seguían en el historial, aunque ya no estaban en el árbol actual. A petición del autor, Claude Code reescribió el historial local con `git filter-branch` y verificó que no quedara ningún blob de esos archivos. El force push lo ejecutó el autor. Queda pendiente pedir a GitHub Support que elimine la referencia del PR #1 (`refs/pull/1/head`) y las vistas en caché. Los demás integrantes deben volver a clonar el repositorio.
 
 ## 7. Decisiones — Modelos alternativos (Avance 4)
 
