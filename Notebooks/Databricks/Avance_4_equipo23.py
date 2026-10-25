@@ -118,8 +118,13 @@ except Exception:
     pass
 
 
+_VERSIONES = {}
+
 def versiones_tablas():
-    versiones = {}
+    """Versión Delta de cada entrada. Se calcula una sola vez por sesión (después de escribir los candidatos)."""
+    if _VERSIONES:
+        return _VERSIONES
+    versiones = _VERSIONES
     for t in ENTRADAS_VERSIONADAS:
         try:
             versiones[f"version__{t.split('.')[-1]}"] = int(spark.sql(f"DESCRIBE HISTORY {t} LIMIT 1").first()["version"])
@@ -446,7 +451,7 @@ for nombre, df in (("Consultas", consultas), ("Fichas", galeria)):
 # COMMAND ----------
 
 from rapidfuzz import process, fuzz
-from rank_bm25 import BM25Okapi
+from rank_bm25 import BM25Okapi, BM25L, BM25Plus
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # --- 0 · Reglas SQL --------------------------------------------------------------
@@ -531,8 +536,10 @@ def matriz_tfidf(vecs, ngramas=2, pesos=PESOS):
     return m
 
 # --- 3 · BM25 -----------------------------------------------------------------------
-def ajustar_bm25(k1=1.5, b=0.75):
-    return {f: BM25Okapi(list(galeria[f"tok_{f}"]), k1=k1, b=b)
+VARIANTES_BM25 = {"okapi": BM25Okapi, "l": BM25L, "plus": BM25Plus}
+
+def ajustar_bm25(k1=1.5, b=0.75, variante="okapi"):
+    return {f: VARIANTES_BM25[variante](list(galeria[f"tok_{f}"]), k1=k1, b=b)
             for f in FACETAS if (galeria[f"tok_{f}"].str.len() > 0).any()}
 
 def matriz_bm25(indices, pesos=PESOS):
@@ -567,14 +574,14 @@ def _conjuntos(df, clave):
                                                       ("marcas", marcas), ("regiones", regiones)]}})
     return pd.DataFrame(filas)
 
-def ajustar_splink(niveles=(2, 1), max_pares_u=1e6, em_iter=25):
+def ajustar_splink(niveles=(2, 1), max_pares_u=1e6, em_iter=25, factor_previa=1.0):
     q, g = _conjuntos(consultas, "id_consulta"), _conjuntos(galeria, "id_ficha")
     settings = SettingsCreator(
         link_type="link_only",
         comparisons=[cl.ArrayIntersectAtSizes(c, list(niveles)) for c in
                      ["prendas", "colores", "prenda_color", "marcas", "regiones"]],
         blocking_rules_to_generate_predictions=["l.sexo = r.sexo", "l.sexo IS NULL", "r.sexo IS NULL"],
-        probability_two_random_records_match=1.0 / len(galeria),
+        probability_two_random_records_match=min(factor_previa / len(galeria), 0.5),
         max_iterations=em_iter,
         retain_intermediate_calculation_columns=False,
     )
@@ -598,11 +605,21 @@ def ranking_splink(linker):
 # --- 5 · Embeddings densos (Foundation Model API de Databricks) ----------------------
 from mlflow.deployments import get_deploy_client
 
-def embeber(textos, endpoint=EMB_ENDPOINT, lote=64):
+def _predict_con_reintentos(cliente, endpoint, entradas, intentos=8):
+    """El endpoint de pago por token limita peticiones por minuto (HTTP 429): se reintenta con espera creciente."""
+    for k in range(intentos):
+        try:
+            return cliente.predict(endpoint=endpoint, inputs={"input": entradas})
+        except Exception as e:
+            if "429" not in str(e) or k == intentos - 1:
+                raise
+            time.sleep(min(2 ** k, 60))
+
+def embeber(textos, endpoint=EMB_ENDPOINT, lote=16):
     cliente = get_deploy_client("databricks")
     vecs = []
     for i in range(0, len(textos), lote):
-        r = cliente.predict(endpoint=endpoint, inputs={"input": [t or "-" for t in textos[i:i + lote]]})
+        r = _predict_con_reintentos(cliente, endpoint, [t or "-" for t in textos[i:i + lote]])
         vecs += [d["embedding"] for d in r["data"]]
     v = np.array(vecs, dtype=float)
     return v / np.linalg.norm(v, axis=1, keepdims=True)
@@ -610,12 +627,16 @@ def embeber(textos, endpoint=EMB_ENDPOINT, lote=64):
 def ajustar_embeddings(endpoint=EMB_ENDPOINT):
     return {f: embeber(list(galeria[f"str_{f}"]), endpoint) for f in FACETAS if (galeria[f"str_{f}"] != "").any()}
 
+SIMS_EMB = {}   # caché: endpoint → {faceta: matriz coseno consulta × ficha}; el ajuste fino no vuelve a llamar al endpoint
+
 def matriz_embeddings(emb_galeria, endpoint=EMB_ENDPOINT, pesos=PESOS):
-    m = np.zeros((len(consultas), len(galeria)))
-    for f, eg in emb_galeria.items():
-        q, g = list(consultas[f"str_{f}"]), list(galeria[f"str_{f}"])
-        m += pesos[f] * _sin_vacios(embeber(q, endpoint) @ eg.T, q, g)
-    return m
+    if endpoint not in SIMS_EMB:
+        sims = {}
+        for f, eg in emb_galeria.items():
+            q, g = list(consultas[f"str_{f}"]), list(galeria[f"str_{f}"])
+            sims[f] = _sin_vacios(embeber(q, endpoint) @ eg.T, q, g)
+        SIMS_EMB[endpoint] = sims
+    return sum((pesos[f] * s for f, s in SIMS_EMB[endpoint].items()), np.zeros((len(consultas), len(galeria))))
 
 # --- 6 · Cross-encoder (preentrenado, zero-shot) --------------------------------------
 from sentence_transformers import CrossEncoder
@@ -623,15 +644,22 @@ from sentence_transformers import CrossEncoder
 def ajustar_cross_encoder(modelo=CROSS_ENCODER):
     return CrossEncoder(modelo, max_length=256)
 
-def matriz_cross_encoder(ce, pesos=PESOS, lote=64):
+SIMS_CE = {}    # caché: faceta → matriz de logits del cross-encoder (NaN = faceta ausente en algún lado)
+
+def matriz_cross_encoder(ce, pesos=PESOS, lote=64, transformacion="logit"):
+    if not SIMS_CE:
+        for f in FACETAS:
+            q, g = list(consultas[f"str_{f}"]), list(galeria[f"str_{f}"])
+            s = np.full((len(consultas), len(galeria)), np.nan)
+            idx = [(i, j) for i, j in zip(cq, cg) if q[i] and g[j]]      # solo pares con la faceta en ambos lados
+            if idx:
+                v = ce.predict([(q[i], g[j]) for i, j in idx], batch_size=lote, show_progress_bar=False)
+                s[tuple(np.array(idx).T)] = v
+            SIMS_CE[f] = s
     m = np.zeros((len(consultas), len(galeria)))
-    for f in FACETAS:
-        q, g = list(consultas[f"str_{f}"]), list(galeria[f"str_{f}"])
-        idx = [(i, j) for i, j in zip(cq, cg) if q[i] and g[j]]      # solo pares con la faceta en ambos lados
-        if idx:
-            s = ce.predict([(q[i], g[j]) for i, j in idx], batch_size=lote, show_progress_bar=False)
-            for (i, j), v in zip(idx, s):
-                m[i, j] += pesos[f] * float(v)
+    for f, s in SIMS_CE.items():
+        t = 1 / (1 + np.exp(-s)) if transformacion == "sigmoide" else s
+        m += pesos[f] * np.nan_to_num(t, nan=0.0)
     return m
 
 # COMMAND ----------
@@ -718,16 +746,270 @@ display(fig)
 
 # COMMAND ----------
 
+
 # MAGIC %md
 # MAGIC ## 7. Ajuste fino de los 2 mejores modelos
 # MAGIC
-# MAGIC *(Siguiente paso: búsqueda de hiperparámetros con Optuna sobre los dos modelos con mayor cobertura, un run hijo por
-# MAGIC intento bajo el run padre `ajuste_top2`.)*
+# MAGIC - **Qué se ajusta:** los dos modelos con mayor cobertura en la sección 6 (sin contar el azar). Cada modelo tiene su
+# MAGIC   espacio de búsqueda; el peso de la faceta *vestimenta* se fija en 1 y se ajusta el de *marcas*, porque la métrica
+# MAGIC   es invariante a la escala y solo importa la proporción entre facetas.
+# MAGIC - **Cómo:** Optuna (TPE, semilla fija), `n_trials` intentos por modelo (50 por defecto), cada intento es un run hijo
+# MAGIC   bajo el run padre `ajuste_top2`.
+# MAGIC - **Generalización sin etiquetas:** las necropsias se parten en dos mitades fijas por hash del identificador.
+# MAGIC   Optuna maximiza la cobertura en la mitad **A (ajuste)**; la mitad **B (validación)** no interviene en la búsqueda y
+# MAGIC   sirve para comprobar que la mejora no es sobreajuste a esas consultas.
+# MAGIC - El umbral de la métrica (z ≥ 5) **no** se ajusta: es parte de la definición de la métrica, no del modelo.
+# MAGIC
+# MAGIC | Modelo | Hiperparámetros |
+# MAGIC |---|---|
+# MAGIC | Reglas SQL | Peso de cada regla (prenda + color, prenda, marca, región de tatuaje) y peso de *marcas* |
+# MAGIC | Fuzzy | Función de similitud (`token_set`, `token_sort`, `partial_token_set`, `WRatio`) y peso de *marcas* |
+# MAGIC | TF-IDF | n-gramas (1 o 1–2), `sublinear_tf`, `min_df` y peso de *marcas* |
+# MAGIC | BM25 | Variante (Okapi, L, Plus), `k1`, `b` y peso de *marcas* |
+# MAGIC | Splink | Niveles de intersección de conjuntos, iteraciones de EM y probabilidad previa de coincidencia |
+# MAGIC | Embeddings | Modelo (qwen3 multilingüe, gte-large, bge-large) y peso de *marcas* |
+# MAGIC | Cross-encoder | Transformación del score (logit o sigmoide) y peso de *marcas* |
+
+# COMMAND ----------
+
+dbutils.widgets.text("n_trials", "50", "Intentos de Optuna por modelo")
+N_TRIALS = int(dbutils.widgets.get("n_trials"))
+
+import hashlib
+import optuna
+from pyspark.sql.window import Window
+from optuna.visualization.matplotlib import plot_optimization_history, plot_param_importances
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+mitad = consultas["id_consulta"].map(lambda x: int(hashlib.sha256(x.encode()).hexdigest(), 16) % 2)
+CONS_A = set(consultas.loc[mitad == 0, "id_consulta"])
+CONS_B = set(consultas.loc[mitad == 1, "id_consulta"])
+print(f"Consultas para ajuste (A): {len(CONS_A)} | para validación (B): {len(CONS_B)}")
+
+
+def _pesos(p):
+    return {"vest": 1.0, "marcas": p.get("peso_marcas", 1.0)}
+
+
+def _medir(entrenar, inferir):
+    t0 = time.perf_counter()
+    obj = entrenar()
+    t1 = time.perf_counter()
+    rk = inferir(obj)
+    return rk, t1 - t0, time.perf_counter() - t1
+
+
+# Para cada modelo: (espacio de búsqueda: trial → params, puntuación: params → (ranking, t_entrenamiento, t_inferencia))
+ESPACIOS = {
+    "0_sql_reglas": (
+        lambda t: {"prenda_color": t.suggest_float("prenda_color", 0, 4), "prenda": t.suggest_float("prenda", 0, 3),
+                   "marca": t.suggest_float("marca", 0, 4), "region_marca": t.suggest_float("region_marca", 0, 4),
+                   "peso_marcas": t.suggest_float("peso_marcas", 0, 3)},
+        lambda p: _medir(lambda: None, lambda _: ranking_sql({k: p[k] for k in PESOS_REGLAS}, _pesos(p)))),
+    "1_fuzzy": (
+        lambda t: {"scorer": t.suggest_categorical("scorer", list(SCORERS)),
+                   "peso_marcas": t.suggest_float("peso_marcas", 0, 3)},
+        lambda p: _medir(lambda: None, lambda _: ranking_desde_matriz(matriz_fuzzy(p["scorer"], _pesos(p))))),
+    "2_tfidf": (
+        lambda t: {"ngramas": t.suggest_categorical("ngramas", [1, 2]),
+                   "sublinear_tf": t.suggest_categorical("sublinear_tf", [True, False]),
+                   "min_df": t.suggest_int("min_df", 1, 3), "peso_marcas": t.suggest_float("peso_marcas", 0, 3)},
+        lambda p: _medir(lambda: ajustar_tfidf(p["ngramas"], p["sublinear_tf"], p["min_df"]),
+                         lambda v: ranking_desde_matriz(matriz_tfidf(v, p["ngramas"], _pesos(p))))),
+    "3_bm25": (
+        lambda t: {"variante": t.suggest_categorical("variante", list(VARIANTES_BM25)),
+                   "k1": t.suggest_float("k1", 0.3, 3.0), "b": t.suggest_float("b", 0.0, 1.0),
+                   "peso_marcas": t.suggest_float("peso_marcas", 0, 3)},
+        lambda p: _medir(lambda: ajustar_bm25(p["k1"], p["b"], p["variante"]),
+                         lambda idx: ranking_desde_matriz(matriz_bm25(idx, _pesos(p))))),
+    "4_splink_em": (
+        lambda t: {"niveles": t.suggest_categorical("niveles", ["1", "2,1", "3,2,1"]),
+                   "em_iter": t.suggest_categorical("em_iter", [10, 25, 50]),
+                   "factor_previa": t.suggest_float("factor_previa", 0.1, 10.0, log=True)},
+        lambda p: _medir(lambda: ajustar_splink(tuple(int(x) for x in p["niveles"].split(",")),
+                                                em_iter=p["em_iter"], factor_previa=p["factor_previa"]),
+                         ranking_splink)),
+    "5_embeddings": (
+        lambda t: {"endpoint": t.suggest_categorical("endpoint", [EMB_ENDPOINT, "databricks-gte-large-en",
+                                                                  "databricks-bge-large-en"]),
+                   "peso_marcas": t.suggest_float("peso_marcas", 0, 3)},
+        lambda p: _medir(lambda: None if p["endpoint"] in SIMS_EMB else ajustar_embeddings(p["endpoint"]),
+                         lambda eg: ranking_desde_matriz(matriz_embeddings(eg, p["endpoint"], _pesos(p))))),
+    "6_cross_encoder": (
+        lambda t: {"transformacion": t.suggest_categorical("transformacion", ["logit", "sigmoide"]),
+                   "peso_marcas": t.suggest_float("peso_marcas", 0, 3)},
+        lambda p: _medir(lambda: None, lambda _: ranking_desde_matriz(
+            matriz_cross_encoder(ce, _pesos(p), transformacion=p["transformacion"])))),
+}
+
+
+def evaluar_mitades(rk):
+    mA, _ = evaluar(rk[rk["id_consulta"].isin(CONS_A)])
+    mB, _ = evaluar(rk[rk["id_consulta"].isin(CONS_B)])
+    return mA, mB
+
+
+TOP2 = list(tabla.loc[tabla["modelo"] != "B0_azar"].sort_values("cobertura", ascending=False)["modelo"].head(2))
+FAMILIA = dict(zip(tabla["modelo"], tabla["familia"]))
+print("Modelos a ajustar:", TOP2)
+
+# COMMAND ----------
+
+resumen_ajuste, estudios, runs_ajustados = [], {}, {}
+
+with fase_padre("ajuste_top2", f"Optuna sobre {TOP2}: {N_TRIALS} intentos por modelo; objetivo = cobertura en la mitad A"):
+    mlflow.log_params({"n_trials": N_TRIALS, "modelos": ",".join(TOP2), "sampler": "TPE", "objetivo": "cobertura_mitad_A"})
+
+    for nombre in TOP2:
+        espacio, puntuar = ESPACIOS[nombre]
+
+        def objetivo(trial, nombre=nombre, espacio=espacio, puntuar=puntuar):
+            p = espacio(trial)
+            with corrida(f"{nombre}__intento_{trial.number:03d}", FAMILIA[nombre], "ajuste_top2", p,
+                         tags={"modelo_base": nombre, "intento": str(trial.number)}):
+                rk, te, ti = puntuar(p)
+                mA, mB = evaluar_mitades(rk)
+                mlflow.log_metrics({"cobertura": mA["cobertura"], "margen_mediano": mA["margen_mediano"],
+                                    "cobertura_validacion": mB["cobertura"], "margen_validacion": mB["margen_mediano"],
+                                    "tiempo_entrenamiento_s": te, "tiempo_inferencia_s": ti})
+            trial.set_user_attr("cobertura_validacion", mB["cobertura"])
+            return mA["cobertura"]
+
+        estudio = optuna.create_study(direction="maximize", study_name=nombre,
+                                      sampler=optuna.samplers.TPESampler(seed=SEMILLA))
+        estudio.optimize(objetivo, n_trials=N_TRIALS)
+        estudios[nombre] = estudio
+
+        fig_h = plot_optimization_history(estudio).figure
+        fig_h.suptitle(f"Historia de optimización — {nombre}")
+        mlflow.log_figure(fig_h, f"graficas/{nombre}_historia.png")
+        try:
+            fig_i = plot_param_importances(estudio).figure
+            fig_i.suptitle(f"Importancia de hiperparámetros — {nombre}")
+            mlflow.log_figure(fig_i, f"graficas/{nombre}_importancia.png")
+        except Exception as e:
+            print(f"{nombre}: sin gráfica de importancia ({e})")
+        plt.close("all")
+
+        # Modelo ajustado: mejores hiperparámetros, evaluado en todas las consultas y en cada mitad
+        with corrida(f"{nombre}_ajustado", FAMILIA[nombre], "ajuste_top2", estudio.best_params,
+                     tags={"modelo_base": nombre, "ajustado": "true"}) as c:
+            rk, te, ti = puntuar(estudio.best_params)
+            c.tiempos = {"tiempo_entrenamiento_s": te, "tiempo_inferencia_s": ti}
+            m = c.registrar(rk)
+            mA, mB = evaluar_mitades(rk)
+            mlflow.log_metrics({"cobertura_ajuste": mA["cobertura"], "cobertura_validacion": mB["cobertura"],
+                                "cobertura_validacion_ic_inf": mB["cobertura_ic_inf"],
+                                "cobertura_validacion_ic_sup": mB["cobertura_ic_sup"]})
+            runs_ajustados[nombre] = c.run.info.run_id
+
+        base = (spark.table(T_RANKINGS).where(F.col("run_id") == resultados[nombre])
+                     .select("id_consulta", "id_ficha", "score").toPandas())
+        bA, bB = evaluar_mitades(base)
+        resumen_ajuste.append({
+            "modelo": nombre, "familia": FAMILIA[nombre], "intentos": len(estudio.trials),
+            "cobertura_base_validacion": bB["cobertura"],
+            "cobertura_ajustada_ajuste": mA["cobertura"], "cobertura_ajustada_validacion": mB["cobertura"],
+            "validacion_ic_inf": mB["cobertura_ic_inf"], "validacion_ic_sup": mB["cobertura_ic_sup"],
+            "cobertura_ajustada_todas": m["cobertura"], "margen_mediano": m["margen_mediano"],
+            "tiempo_entrenamiento_s": te, "tiempo_inferencia_ms_por_consulta": 1000 * ti / max(len(consultas), 1),
+            "mejores_hiperparametros": json.dumps(estudio.best_params, default=str),
+        })
+
+    resumen_ajuste = pd.DataFrame(resumen_ajuste)
+    mlflow.log_table(resumen_ajuste, "resumen_ajuste.json")      # solo métricas agregadas e hiperparámetros
+
+display(resumen_ajuste)
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 8. Elección del modelo final
 # MAGIC
-# MAGIC *(Siguiente paso: comparar los dos modelos ajustados en cobertura, margen, concordancia, tiempos e
-# MAGIC interpretabilidad para el perito, y justificar la elección.)*
+# MAGIC **Criterios, en orden:**
+# MAGIC 1. **Cobertura en validación (mitad B)** del modelo ajustado: la métrica principal medida en consultas que no
+# MAGIC    intervinieron en el ajuste.
+# MAGIC 2. Si los intervalos de confianza de los dos modelos se traslapan, la diferencia no es concluyente y se prefiere el
+# MAGIC    **más interpretable para el perito**: que pueda explicar por qué propone un candidato (qué prenda, color o
+# MAGIC    tatuaje coincide). Orden de interpretabilidad: reglas SQL > BM25 > TF-IDF > fuzzy > Splink > embeddings >
+# MAGIC    cross-encoder.
+# MAGIC 3. Como contexto: margen (qué tan separado queda el mejor candidato), concordancia con los demás métodos y tiempos.
+# MAGIC
+# MAGIC El modelo elegido genera la tabla `candidatos_top10_modelo_final` en Unity Catalog: las 10 fichas candidatas de cada
+# MAGIC necropsia no identificada, para revisión pericial. Esa tabla no se imprime ni se registra en MLflow.
+
+# COMMAND ----------
+
+INTERPRETABILIDAD = ["0_sql_reglas", "3_bm25", "2_tfidf", "1_fuzzy", "4_splink_em", "5_embeddings", "6_cross_encoder"]
+
+r = resumen_ajuste.set_index("modelo")
+a, b = sorted(TOP2, key=lambda x: -r.loc[x, "cobertura_ajustada_validacion"])
+traslape = r.loc[b, "validacion_ic_sup"] >= r.loc[a, "validacion_ic_inf"]
+if traslape:
+    FINAL = min(TOP2, key=INTERPRETABILIDAD.index)
+    CRITERIO = (f"IC 95 % de validación traslapados ({a}: {r.loc[a, 'validacion_ic_inf']:.3f}–{r.loc[a, 'validacion_ic_sup']:.3f}; "
+                f"{b}: {r.loc[b, 'validacion_ic_inf']:.3f}–{r.loc[b, 'validacion_ic_sup']:.3f}) → se elige el más interpretable")
+else:
+    FINAL = a
+    CRITERIO = f"{a} supera a {b} en cobertura de validación con IC 95 % sin traslape"
+
+conc = concordancia_top10(list(runs_ajustados.values()))
+print(f"Modelo final: {FINAL}\nCriterio: {CRITERIO}")
+print("Concordancia top-10 entre los dos ajustados:",
+      {nombre: round(conc.get(rid, float("nan")), 3) for nombre, rid in runs_ajustados.items()})
+
+top10 = (spark.table(T_RANKINGS).where(F.col("run_id") == runs_ajustados[FINAL])
+              .join(spark.table(T_NECROPSIAS).select(F.col("no_nec").cast("string").alias("id_consulta"), "status"),
+                    "id_consulta")
+              .where(F.upper("status").like("NO IDENT%"))
+              .withColumn("rango", F.row_number().over(Window.partitionBy("id_consulta").orderBy(F.desc("score"))))
+              .where("rango <= 10")
+              .select("id_consulta", "id_ficha", "score", "rango", F.lit(FINAL).alias("modelo")))
+top10.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(_t("candidatos_top10_modelo_final"))
+
+with fase_padre("final", f"Modelo final: {FINAL}. {CRITERIO}"):
+    mlflow.log_params({"modelo_final": FINAL, "criterio": CRITERIO[:480], "finalistas": ",".join(TOP2),
+                       "run_modelo_final": runs_ajustados[FINAL]})
+    mlflow.log_metrics({"cobertura_validacion_final": float(r.loc[FINAL, "cobertura_ajustada_validacion"]),
+                        "necropsias_no_identificadas_con_top10": top10.select("id_consulta").distinct().count()})
+    mlflow.log_table(resumen_ajuste, "resumen_finalistas.json")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Justificación del modelo final
+# MAGIC
+# MAGIC *Resultados de la ejecución del 25 de octubre de 2026 (galería `facetas`, 884 necropsias, 50 intentos por modelo).*
+# MAGIC
+# MAGIC | Finalista | Cobertura base | Cobertura ajustada (A, ajuste) | Cobertura ajustada (B, validación) | Margen | Inferencia por consulta |
+# MAGIC |---|---|---|---|---|---|
+# MAGIC | **BM25** (variante L, k1 ≈ 3.0, b ≈ 0.01, peso marcas ≈ 0.12) | 0.469 | 0.692 | **0.699** (IC 95 % 0.655–0.745) | 1.98 | 0.52 ms |
+# MAGIC | TF-IDF (1–2-gramas, sin sublinear, peso marcas ≈ 3.0) | 0.602 | 0.613 | 0.609 (IC 95 % 0.566–0.657) | 0.83 | 0.03 ms |
+# MAGIC
+# MAGIC **Modelo final: BM25 ajustado.**
+# MAGIC 1. **Métrica principal.** Es el de mayor cobertura en la mitad de validación (0.699 frente a 0.609). Los intervalos
+# MAGIC    apenas se tocan (0.655 frente a 0.657), así que la diferencia no se declara concluyente. El desempate por
+# MAGIC    interpretabilidad apunta al mismo modelo.
+# MAGIC 2. **Generalización.** La cobertura en la mitad B (0.699), que no intervino en la búsqueda, es igual a la de la mitad A
+# MAGIC    (0.692): la mejora no es sobreajuste a las consultas usadas para ajustar.
+# MAGIC 3. **El ajuste sí aportó.** BM25 pasó de 0.469 a 0.699 en validación (+0.23); TF-IDF casi no cambió (0.602 → 0.609).
+# MAGIC 4. **Interpretabilidad para el perito.** El score de BM25 es una suma de contribuciones por palabra coincidente,
+# MAGIC    ponderadas por su rareza en las fichas: se puede mostrar al perito qué prendas, colores o marcas explican cada
+# MAGIC    candidato. Es más legible que un coseno de TF-IDF y mucho más que embeddings o el cross-encoder.
+# MAGIC 5. **Costo.** Sin entrenamiento y con 0.5 ms por consulta, puede correr sobre todo el libro en segundos.
+# MAGIC
+# MAGIC **Lectura de los hiperparámetros.** `b ≈ 0` apaga la normalización por longitud: una ficha con descripción larga no
+# MAGIC se penaliza, lo cual tiene sentido porque más prendas descritas es más evidencia, no ruido. `k1 ≈ 3` hace que repetir
+# MAGIC un término siga sumando. El peso de *marcas* cae a ≈ 0.12 porque casi ninguna necropsia registra tatuajes (12 de
+# MAGIC 1,246), así que esa faceta aporta poco a la cobertura.
+# MAGIC
+# MAGIC **Limitaciones (declaradas).**
+# MAGIC - La cobertura mide que el modelo propone un candidato que **destaca**, no que sea el correcto. Optimizarla favorece
+# MAGIC   scores más "picudos"; la validación en la mitad B descarta el sobreajuste a consultas, pero no confirma aciertos.
+# MAGIC   La confirmación es pericial: la tabla `candidatos_top10_modelo_final` deja 620 necropsias no identificadas con sus
+# MAGIC   10 fichas candidatas para esa revisión.
+# MAGIC - `k1` y el peso de *marcas* de BM25, y el peso de *marcas* de TF-IDF, quedaron en el borde de su rango de búsqueda;
+# MAGIC   ampliar esos rangos es el siguiente paso del ajuste.
+# MAGIC - Bajar el peso de los tatuajes es lo que maximiza la cobertura con los datos actuales, pero en un caso concreto un
+# MAGIC   tatuaje coincidente es evidencia muy fuerte. Se recomienda que el SEMEFO registre tatuajes de forma sistemática y
+# MAGIC   que la salida al perito siempre muestre las coincidencias de tatuajes aunque pesen poco en el score.

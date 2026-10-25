@@ -187,6 +187,23 @@ Decisión 25: Usar la cobertura como métrica principal del Avance 4, medida sin
 - Alternativa descartada y motivo: Precisión@5 según revisión pericial, porque no se cuenta con el perito en esta etapa. Concordancia entre métodos como métrica principal, porque es circular (premia parecerse a la mayoría).
 - Participación de la IA: El autor eligió la cobertura. Claude Code propuso la definición con z robusto. La primera versión (z ≥ 3) falló la autoprueba del arnés: con scores al azar daba 21 % de cobertura. A raíz de eso, Claude Code simuló la distribución nula y ajustó el umbral a z ≥ 5 con mínimo 15 candidatos. El arnés actualizado pasó la autoprueba en Databricks.
 
+Decisión 26: Elegir BM25 ajustado como modelo individual final del Avance 4
+- Justificación: En la comparativa de los 7 modelos no supervisados sobre 884 necropsias reales contra 60 fichas (galería por facetas, blocking por sexo), los léxicos fueron los mejores:
+  - Cobertura: TF-IDF 0.602, BM25 0.469, Splink 0.356, cross-encoder 0.317, reglas SQL 0.205, fuzzy 0.175, embeddings 0.000 y azar 0.000.
+  - Ajuste fino con Optuna, 50 intentos por finalista, optimizando en una mitad de las necropsias y validando en la otra: BM25 llegó a 0.699 en validación (IC 95 % 0.655–0.745) y TF-IDF a 0.609 (0.566–0.657).
+  - Los intervalos apenas se tocan. El desempate por interpretabilidad (contribución por palabra coincidente, visible para el perito), por costo (0.5 ms por consulta) y por la mejora en validación igual a la de ajuste coincide con BM25.
+- Limitaciones declaradas:
+  - La cobertura mide señal, no acierto.
+  - El ajuste bajó a ≈ 0.12 el peso de los tatuajes porque casi no se registran en las necropsias. La salida al perito debe mostrar siempre las coincidencias de tatuajes.
+  - k1 y los pesos de marcas quedaron en el borde de su rango de búsqueda.
+- Alternativa descartada y motivo: TF-IDF, con menor cobertura en validación y menos legible para el perito. Los embeddings densos y el cross-encoder, sin señal suficiente o con un costo unas 20 mil veces mayor por consulta.
+- Participación de la IA: Claude Code escribió el notebook único `Avance_4_equipo23` (arnés, 7 modelos, ajuste fino y elección), lo ejecutó como job en Databricks y redactó la justificación con los resultados. Hubo tres incidencias que la IA corrigió:
+  - La versión de MLflow del cómputo serverless no aceptaba `parent_run_id`.
+  - El endpoint de embeddings limitó las peticiones (HTTP 429); se agregaron reintentos.
+  - El texto de `fichas_vector_search_gold` no describe prendas: Claude Code lo detectó en el código del notebook 03, lo verificó con conteos (0 de 75 fichas mencionan prendas) y lo comprobó empíricamente (reglas SQL con cobertura 0 en esa galería). Por eso se usó la galería por facetas.
+
+  El autor eligió la métrica, aprobó los modelos y pidió que todo quedara en un solo notebook.
+
 ### Propuestas pendientes de aprobación (Avance 4)
 
 Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las apruebe, rechace o modifique, pasan a ser decisiones numeradas.
