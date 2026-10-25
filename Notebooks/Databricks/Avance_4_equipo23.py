@@ -30,7 +30,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -q rapidfuzz rank_bm25 "splink>=4,<5" sentence-transformers optuna
+# MAGIC %pip install -qqq --disable-pip-version-check rapidfuzz rank_bm25 "splink>=4,<5" sentence-transformers optuna
 
 # COMMAND ----------
 
@@ -49,9 +49,19 @@ dbutils.widgets.text("cross_encoder", "cross-encoder/mmarco-mMiniLMv2-L12-H384-v
 
 # COMMAND ----------
 
+import os
 import re
 import time
 import json
+import logging
+import warnings
+
+# Salidas limpias: sin avisos de dependencias, barras de descarga ni logs informativos de las librerías
+warnings.filterwarnings("ignore")
+os.environ.update({"HF_HUB_DISABLE_PROGRESS_BARS": "1", "TRANSFORMERS_VERBOSITY": "error",
+                   "TOKENIZERS_PARALLELISM": "false", "HF_HUB_DISABLE_TELEMETRY": "1"})
+for nombre_logger in ("splink", "py4j", "sentence_transformers", "transformers", "huggingface_hub", "mlflow"):
+    logging.getLogger(nombre_logger).setLevel(logging.ERROR)
 import posixpath
 import contextlib
 import unicodedata
@@ -445,6 +455,10 @@ for nombre, df in (("Consultas", consultas), ("Fichas", galeria)):
 # MAGIC | `2_tfidf` | léxico | TF-IDF unigramas + bigramas y coseno | Vocabulario e IDF |
 # MAGIC | `3_bm25` | léxico ponderado | BM25 Okapi con las fichas como corpus | Índice BM25 |
 # MAGIC | `4_splink_em` | probabilístico | Fellegi-Sunter: pesos m/u por nivel de coincidencia estimados con EM (Splink) | u por muestreo + EM |
+# MAGIC
+# MAGIC *Nota sobre Splink:* la comparación de **marcas** casi nunca tiene datos en ambos lados (21 necropsias con marcas),
+# MAGIC así que EM no puede estimar todos sus niveles; Splink la deja con valores por defecto. Es consecuencia de los datos
+# MAGIC (el SEMEFO casi no registra tatuajes), no un error del modelo.
 # MAGIC | `5_embeddings` | semántica densa | Embeddings multilingües (`qwen3-embedding-0.6b`) y coseno: k-NN exacto, el mismo cálculo que hace Vector Search | Embeddings de la galería |
 # MAGIC | `6_cross_encoder` | semántica de interacción | Cross-encoder multilingüe preentrenado (mMARCO), sin ajuste con nuestros datos | Carga del modelo |
 
@@ -920,6 +934,25 @@ with fase_padre("ajuste_top2", f"Optuna sobre {TOP2}: {N_TRIALS} intentos por mo
     mlflow.log_table(resumen_ajuste, "resumen_ajuste.json")      # solo métricas agregadas e hiperparámetros
 
 display(resumen_ajuste)
+
+# COMMAND ----------
+
+# MAGIC %md ### Convergencia de la búsqueda e importancia de hiperparámetros
+# MAGIC
+# MAGIC Si la curva del mejor valor se aplana antes del último intento, la búsqueda fue suficientemente profunda.
+
+# COMMAND ----------
+
+for nombre, estudio in estudios.items():
+    fig_h = plot_optimization_history(estudio).figure
+    fig_h.suptitle(f"Historia de optimización — {nombre} ({len(estudio.trials)} intentos)")
+    display(fig_h)
+    try:
+        fig_i = plot_param_importances(estudio).figure
+        fig_i.suptitle(f"Importancia de hiperparámetros — {nombre}")
+        display(fig_i)
+    except Exception as e:
+        print(f"{nombre}: sin gráfica de importancia ({e})")
 
 # COMMAND ----------
 
