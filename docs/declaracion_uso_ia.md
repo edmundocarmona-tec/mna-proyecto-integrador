@@ -204,6 +204,27 @@ Decisión 26: Elegir BM25 ajustado como modelo individual final del Avance 4
 
   El autor eligió la métrica, aprobó los modelos y pidió que todo quedara en un solo notebook.
 
+### Revisión de los entregables del Avance 4 contra la rúbrica (hecha por la IA)
+
+El autor pidió a Claude Code comparar los dos notebooks del Avance 4 contra la rúbrica (Comparativa 60, Ajuste fino 30, Modelo individual 10). La revisión leyó la estructura, el código y los tipos de salida. No abrió filas ni textos de las salidas. Es una estimación de la IA, no una calificación oficial. La elección del entregable corresponde al equipo.
+
+| Criterio | `Avance_4_Modelos_Alternativos_equipo23.ipynb` (Jaqueline) | `…_forensic_match.ipynb` (Edmundo), primera versión sin salidas | `…_forensic_match.ipynb` (Edmundo), versión con salidas (25 oct, 08:40) |
+|---|---|---|---|
+| Comparativa (60) | 56–60 | 30–40 | 52–57 |
+| Ajuste fino (30) | 27–30 | 12–18 | 23–27 |
+| Modelo individual (10) | 9–10 | 2–4 | 8–9 |
+| Total estimado | ≈ 92–100 | ≈ 45–60 | ≈ 83–93 |
+
+- Notebook de Jaqueline: 8 clasificadores individuales sobre un vector de comparación de 10 características, evaluados con pseudo-fichas. Tiene tabla visible ordenada por Recall@10, seis métricas, tiempos e IC. Ajusta 3 modelos con 300 ajustes cada uno, incluido un MLP con tasa de aprendizaje, activación y arquitectura. Elige el modelo final con una matriz de decisión ponderada (regresión logística, Recall@10 = 0.869).
+  - Observaciones: es un enfoque supervisado con pseudo-fichas, que contradice la Decisión 24. Su Recall@10 es un techo optimista y no el desempeño con fichas reales.
+  - Privacidad: tres tablas de salida con cuasi-identificadores de expedientes reales (sexo, edad, estatura, municipio) que deben limpiarse antes de entregar.
+- Notebook de Edmundo: 7 modelos no supervisados sobre datos reales, con cobertura como métrica principal y Optuna sobre los 2 mejores (modelo final BM25, Decisión 26).
+  - La primera versión en el repositorio era el clon del job sin salidas (Databricks no las incluye al hacer commit desde una carpeta Git) y con la sección 8 provisional. El autor la reemplazó por una versión con salidas y justificación completa, y la IA la recalificó.
+  - Las salidas solo contienen agregados: conteos, tabla comparativa, tabla de ajuste y gráficas. No hay filas reales.
+  - Pendientes que restan puntos: las curvas de convergencia y la importancia de hiperparámetros quedaron solo en MLflow; hay ruido de instalación y advertencias de Splink en las salidas; la métrica es poco convencional (mide señal, no acierto); solo se ajustan dos modelos, sin red neuronal.
+- Conclusión de la revisión: el notebook de Jaqueline obtendría mejor calificación con esta rúbrica. El de Edmundo describe con más fidelidad lo que los datos reales permiten hoy.
+- Participación de la IA: Claude Code realizó la revisión y la estimación de puntajes. También es autor de buena parte del código del notebook de Edmundo, lo que se declara como posible sesgo de la revisión.
+
 ### Propuestas pendientes de aprobación (Avance 4)
 
 Las redactó Claude Code en el plan `docs/plan_avance4.md`. Cuando el equipo las apruebe, rechace o modifique, pasan a ser decisiones numeradas.
